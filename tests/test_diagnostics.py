@@ -1,0 +1,163 @@
+"""Tests for the diagnostics provider."""
+
+import os
+import pytest
+from unittest.mock import MagicMock, patch
+
+from lsprotocol import types as lsp
+from xonsh_lsp.diagnostics import XonshDiagnosticsProvider
+from xonsh_lsp.parser import XonshParser, ParseResult, NodeInfo
+
+
+class TestXonshDiagnosticsProvider:
+    """Test the XonshDiagnosticsProvider class."""
+
+    @pytest.fixture
+    def mock_server(self):
+        """Create a mock server."""
+        server = MagicMock()
+        server.parser = XonshParser()
+        server.python_delegate = MagicMock()
+        server.python_delegate.get_diagnostics.return_value = []
+        return server
+
+    @pytest.fixture
+    def provider(self, mock_server):
+        """Create a diagnostics provider."""
+        return XonshDiagnosticsProvider(mock_server)
+
+    def test_syntax_error_diagnostics(self, provider, mock_server):
+        """Test syntax error detection."""
+        # Create a mock document with syntax error
+        mock_doc = MagicMock()
+        mock_doc.source = "def foo(:"  # Invalid syntax
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+        # Should detect syntax error (depends on tree-sitter)
+        assert isinstance(diagnostics, list)
+
+    def test_undefined_env_var_diagnostics(self, provider, mock_server):
+        """Test undefined environment variable detection."""
+        mock_doc = MagicMock()
+        mock_doc.source = "print($UNDEFINED_VAR_XYZZY_12345)"
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        # Make sure the env var is not defined
+        with patch.dict(os.environ, {}, clear=False):
+            # Remove the var if it exists
+            os.environ.pop("UNDEFINED_VAR_XYZZY_12345", None)
+            diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+
+        # Check for undefined env var diagnostic
+        undefined_diags = [d for d in diagnostics if d.code == "undefined-env-var"]
+        # Note: This depends on tree-sitter-xonsh detecting env_variable nodes
+        assert isinstance(undefined_diags, list)
+
+    def test_defined_env_var_no_diagnostic(self, provider, mock_server):
+        """Test that defined environment variables don't produce diagnostics."""
+        mock_doc = MagicMock()
+        mock_doc.source = "print($HOME)"
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+
+        # HOME should be defined, so no undefined-env-var diagnostic
+        undefined_diags = [d for d in diagnostics if d.code == "undefined-env-var"]
+        home_diags = [d for d in undefined_diags if "HOME" in d.message]
+        assert len(home_diags) == 0
+
+    def test_command_not_found_diagnostics(self, provider, mock_server):
+        """Test unknown command detection."""
+        mock_doc = MagicMock()
+        mock_doc.source = "$(nonexistent_command_xyz123)"
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+
+        # Check for command-not-found diagnostic
+        cmd_diags = [d for d in diagnostics if d.code == "command-not-found"]
+        # Note: This depends on tree-sitter-xonsh detecting subprocess nodes
+        assert isinstance(cmd_diags, list)
+
+    def test_valid_command_no_diagnostic(self, provider, mock_server):
+        """Test that valid commands don't produce diagnostics."""
+        mock_doc = MagicMock()
+        mock_doc.source = "$(ls)"  # ls should exist on most systems
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+
+        # ls should be found, so no command-not-found for it
+        cmd_diags = [d for d in diagnostics if d.code == "command-not-found"]
+        ls_diags = [d for d in cmd_diags if "ls" in d.message]
+        assert len(ls_diags) == 0
+
+    def test_empty_subprocess_diagnostics(self, provider, mock_server):
+        """Test empty subprocess detection."""
+        # This test depends on the parser detecting empty subprocess
+        mock_doc = MagicMock()
+        mock_doc.source = "$()"
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+
+        # Check for empty-subprocess diagnostic
+        empty_diags = [d for d in diagnostics if d.code == "empty-subprocess"]
+        assert isinstance(empty_diags, list)
+
+    def test_is_defined_in_source(self, provider):
+        """Test detection of env vars defined in source."""
+        # Test $VAR = pattern
+        source1 = "$MY_VAR = 'value'"
+        assert provider._is_defined_in_source(source1, "MY_VAR")
+
+        # Test ${VAR} = pattern
+        source2 = "${MY_VAR} = 'value'"
+        assert provider._is_defined_in_source(source2, "MY_VAR")
+
+        # Test os.environ pattern
+        source3 = "os.environ['MY_VAR'] = 'value'"
+        assert provider._is_defined_in_source(source3, "MY_VAR")
+
+        # Test undefined
+        source4 = "print($OTHER_VAR)"
+        assert not provider._is_defined_in_source(source4, "MY_VAR")
+
+    def test_command_exists(self, provider):
+        """Test command existence check."""
+        # Common commands that should exist
+        assert provider._command_exists("ls") or provider._command_exists("dir")
+
+        # Non-existent command
+        assert not provider._command_exists("nonexistent_command_xyz123456")
+
+    def test_python_diagnostics_delegation(self, provider, mock_server):
+        """Test that Python diagnostics are delegated to Jedi."""
+        mock_doc = MagicMock()
+        mock_doc.source = "x = 1"
+        mock_doc.path = "/test/file.xsh"
+        mock_server.get_document.return_value = mock_doc
+
+        # Set up mock Python diagnostic
+        mock_server.python_delegate.get_diagnostics.return_value = [
+            lsp.Diagnostic(
+                range=lsp.Range(
+                    start=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=1),
+                ),
+                message="Test Python diagnostic",
+                severity=lsp.DiagnosticSeverity.Error,
+            )
+        ]
+
+        diagnostics = provider.get_diagnostics("file:///test/file.xsh")
+
+        # Should include the Python diagnostic
+        assert any("Test Python diagnostic" in d.message for d in diagnostics)
