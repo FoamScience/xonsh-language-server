@@ -59,16 +59,17 @@ class TestXonshDiagnosticsProvider:
     def test_defined_env_var_no_diagnostic(self, provider, mock_server):
         """Test that defined environment variables don't produce diagnostics."""
         mock_doc = MagicMock()
-        mock_doc.source = "print($HOME)"
+        # Use PATH which exists on all platforms
+        mock_doc.source = "print($PATH)"
         mock_doc.path = "/test/file.xsh"
         mock_server.get_document.return_value = mock_doc
 
         diagnostics = provider.get_diagnostics("file:///test/file.xsh")
 
-        # HOME should be defined, so no undefined-env-var diagnostic
+        # PATH should be defined on all platforms, so no undefined-env-var diagnostic
         undefined_diags = [d for d in diagnostics if d.code == "undefined-env-var"]
-        home_diags = [d for d in undefined_diags if "HOME" in d.message]
-        assert len(home_diags) == 0
+        path_diags = [d for d in undefined_diags if "PATH" in d.message]
+        assert len(path_diags) == 0
 
     def test_command_not_found_diagnostics(self, provider, mock_server):
         """Test unknown command detection."""
@@ -87,16 +88,17 @@ class TestXonshDiagnosticsProvider:
     def test_valid_command_no_diagnostic(self, provider, mock_server):
         """Test that valid commands don't produce diagnostics."""
         mock_doc = MagicMock()
-        mock_doc.source = "$(ls)"  # ls should exist on most systems
+        # Use python which should exist on all platforms in CI
+        mock_doc.source = "$(python --version)"
         mock_doc.path = "/test/file.xsh"
         mock_server.get_document.return_value = mock_doc
 
         diagnostics = provider.get_diagnostics("file:///test/file.xsh")
 
-        # ls should be found, so no command-not-found for it
+        # python should be found, so no command-not-found for it
         cmd_diags = [d for d in diagnostics if d.code == "command-not-found"]
-        ls_diags = [d for d in cmd_diags if "ls" in d.message]
-        assert len(ls_diags) == 0
+        python_diags = [d for d in cmd_diags if "python" in d.message.lower()]
+        assert len(python_diags) == 0
 
     def test_empty_subprocess_diagnostics(self, provider, mock_server):
         """Test empty subprocess detection."""
@@ -132,8 +134,8 @@ class TestXonshDiagnosticsProvider:
 
     def test_command_exists(self, provider):
         """Test command existence check."""
-        # Common commands that should exist
-        assert provider._command_exists("ls") or provider._command_exists("dir")
+        # python should exist on all platforms in CI
+        assert provider._command_exists("python")
 
         # Non-existent command
         assert not provider._command_exists("nonexistent_command_xyz123456")

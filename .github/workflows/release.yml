@@ -53,7 +53,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     environment:
       name: pypi
-      url: https://pypi.org/p/xonsh-language-server
+      url: https://pypi.org/p/xonsh-lsp
     permissions:
       id-token: write
 

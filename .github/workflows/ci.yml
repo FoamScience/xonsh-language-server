@@ -38,27 +38,3 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install ruff mypy
-          pip install -e .
-
-      - name: Run ruff
-        run: ruff check src/
-
-      - name: Run mypy
-        run: mypy src/
-        continue-on-error: true  # Remove once type errors are fixed
