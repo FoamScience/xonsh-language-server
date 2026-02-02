@@ -1,0 +1,25 @@
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+*.egg-info/
+dist/
+build/
+
+# Type checking
+.mypy_cache/
+
+# Testing
+.coverage
+htmlcov/
+.pytest_cache/
+
+# IDE
+.idea/
+.vscode/
+*.swp
