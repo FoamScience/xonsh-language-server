@@ -2,7 +2,7 @@
 Go-to-definition provider for xonsh LSP.
 
 Provides go-to-definition for:
-- Python symbols (via Jedi delegate)
+- Python symbols (via backend - Jedi or LSP proxy)
 - Xonsh aliases defined in file
 - Environment variables set in file
 """
@@ -27,7 +27,7 @@ class XonshDefinitionProvider:
     def __init__(self, server: XonshLanguageServer):
         self.server = server
 
-    def get_definition(
+    async def get_definition(
         self, params: lsp.DefinitionParams
     ) -> lsp.Location | list[lsp.Location] | None:
         """Get definition location(s) for symbol at position."""
@@ -66,8 +66,8 @@ class XonshDefinitionProvider:
         if func_def:
             locations.append(func_def)
 
-        # Get Python definitions from Jedi
-        python_defs = self.server.python_delegate.get_definitions(
+        # Get Python definitions from backend
+        python_defs = await self.server.python_delegate.get_definitions(
             source, line, col, doc.path
         )
         locations.extend(python_defs)
@@ -274,12 +274,6 @@ class XonshReferenceProvider:
                                 ),
                             )
                         )
-
-        # Get Python references from Jedi
-        python_refs = self.server.python_delegate.get_references(
-            source, line, col, doc.path
-        )
-        locations.extend(python_refs)
 
         return locations if locations else None
 

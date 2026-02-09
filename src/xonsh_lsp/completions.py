@@ -5,7 +5,7 @@ Provides intelligent code completions for:
 - Environment variables
 - Subprocess commands (from PATH)
 - Xonsh builtins
-- Python completions (via Jedi delegate)
+- Python completions (via backend - Jedi or LSP proxy)
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ class XonshCompletionProvider:
         self._command_cache: list[str] | None = None
         self._command_cache_time: float = 0
 
-    def get_completions(self, params: lsp.CompletionParams) -> lsp.CompletionList | None:
+    async def get_completions(self, params: lsp.CompletionParams) -> lsp.CompletionList | None:
         """Get completions at the given position."""
         uri = params.text_document.uri
         doc = self.server.get_document(uri)
@@ -85,7 +85,7 @@ class XonshCompletionProvider:
 
         # Python evaluation completions
         if trigger_char == "@" or "@(" in text_before:
-            py_eval_items = self._get_python_eval_completions(source, line, col)
+            py_eval_items = await self._get_python_eval_completions(source, line, col)
             logger.debug(f"Added {len(py_eval_items)} python eval completions")
             items.extend(py_eval_items)
 
@@ -117,7 +117,7 @@ class XonshCompletionProvider:
             items.extend(cmd_items)
         else:
             # Python completions
-            python_completions = self.server.python_delegate.get_completions(
+            python_completions = await self.server.python_delegate.get_completions(
                 source, line, col, doc.path
             )
             logger.debug(f"Added {len(python_completions)} python completions")
@@ -385,12 +385,12 @@ class XonshCompletionProvider:
 
         return items
 
-    def _get_python_eval_completions(
+    async def _get_python_eval_completions(
         self, source: str, line: int, col: int
     ) -> list[lsp.CompletionItem]:
         """Get completions inside @() Python evaluation."""
         # Delegate to Python completions
-        return self.server.python_delegate.get_completions(source, line, col, None)
+        return await self.server.python_delegate.get_completions(source, line, col, None)
 
     def _is_path_context(self, text_before: str) -> bool:
         """Check if we're in a path completion context."""

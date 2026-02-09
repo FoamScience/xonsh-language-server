@@ -5,7 +5,11 @@ Provides diagnostics for:
 - Syntax errors from tree-sitter
 - Undefined environment variables
 - Invalid subprocess syntax
-- Python diagnostics (via Jedi delegate)
+- Python diagnostics (via backend - Jedi or LSP proxy)
+
+Supports two-phase diagnostics merging:
+- Phase 1: xonsh-specific diagnostics (synchronous, returned immediately)
+- Phase 2: Python diagnostics (async from backend callback, merged and re-published)
 """
 
 from __future__ import annotations
@@ -31,9 +35,17 @@ class XonshDiagnosticsProvider:
 
     def __init__(self, server: XonshLanguageServer):
         self.server = server
+        # Diagnostics caches for two-phase merging
+        self._xonsh_diagnostics: dict[str, list[lsp.Diagnostic]] = {}
+        self._python_diagnostics: dict[str, list[lsp.Diagnostic]] = {}
 
-    def get_diagnostics(self, uri: str) -> list[lsp.Diagnostic]:
-        """Get all diagnostics for a document."""
+    async def get_diagnostics(self, uri: str) -> list[lsp.Diagnostic]:
+        """Get all diagnostics for a document.
+
+        For JediBackend: returns both xonsh and Python diagnostics synchronously.
+        For LspProxyBackend: returns xonsh diagnostics immediately; Python
+        diagnostics arrive asynchronously via on_backend_diagnostics().
+        """
         doc = self.server.get_document(uri)
         if doc is None:
             return []
@@ -56,13 +68,42 @@ class XonshDiagnosticsProvider:
             self._get_subprocess_diagnostics(doc.source, parse_result)
         )
 
-        # Python diagnostics (from Jedi)
-        python_diagnostics = self.server.python_delegate.get_diagnostics(
+        # Cache xonsh diagnostics
+        self._xonsh_diagnostics[uri] = list(diagnostics)
+
+        # Python diagnostics (from backend)
+        python_diagnostics = await self.server.python_delegate.get_diagnostics(
             doc.source, doc.path
         )
-        diagnostics.extend(python_diagnostics)
+        if python_diagnostics:
+            self._python_diagnostics[uri] = python_diagnostics
+            diagnostics.extend(python_diagnostics)
+        elif uri in self._python_diagnostics:
+            # For proxy backend, include previously cached Python diagnostics
+            diagnostics.extend(self._python_diagnostics[uri])
 
         return diagnostics
+
+    def on_backend_diagnostics(self, uri: str, diagnostics: list[lsp.Diagnostic]) -> None:
+        """Handle asynchronous diagnostics from the proxy backend.
+
+        Caches the Python diagnostics and re-publishes merged diagnostics
+        (xonsh + Python) to the editor.
+        """
+        self._python_diagnostics[uri] = diagnostics
+
+        # Merge with cached xonsh diagnostics and re-publish
+        xonsh_diags = self._xonsh_diagnostics.get(uri, [])
+        merged = xonsh_diags + diagnostics
+
+        self.server.text_document_publish_diagnostics(
+            lsp.PublishDiagnosticsParams(uri=uri, diagnostics=merged)
+        )
+
+    def clear_cache(self, uri: str) -> None:
+        """Clear cached diagnostics for a URI."""
+        self._xonsh_diagnostics.pop(uri, None)
+        self._python_diagnostics.pop(uri, None)
 
     def _get_syntax_errors(self, parse_result) -> list[lsp.Diagnostic]:
         """Get syntax error diagnostics from tree-sitter."""

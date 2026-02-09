@@ -5,7 +5,7 @@ Provides hover information for:
 - Environment variables (shows current value)
 - Xonsh operators (documentation)
 - Subprocess commands (man page summary, path)
-- Python symbols (via Jedi delegate)
+- Python symbols (via backend - Jedi or LSP proxy)
 """
 
 from __future__ import annotations
@@ -38,7 +38,7 @@ class XonshHoverProvider:
     def __init__(self, server: XonshLanguageServer):
         self.server = server
 
-    def get_hover(self, params: lsp.HoverParams) -> lsp.Hover | None:
+    async def get_hover(self, params: lsp.HoverParams) -> lsp.Hover | None:
         """Get hover information at the given position."""
         uri = params.text_document.uri
         doc = self.server.get_document(uri)
@@ -64,7 +64,7 @@ class XonshHoverProvider:
 
         # Check if we're hovering over a Python expression inside ${...}
         elif self._is_inside_braced_env_var(source, line, col):
-            hover_content = self._get_braced_env_var_hover(source, line, col, word)
+            hover_content = await self._get_braced_env_var_hover(source, line, col, word)
 
         # Check for path literal (p"...", pf"...", pr"...", pb"...")
         elif self._is_path_literal_context(source, line, col):
@@ -88,7 +88,7 @@ class XonshHoverProvider:
 
         # Fall back to Python hover
         if hover_content is None:
-            hover_content = self.server.python_delegate.get_hover(
+            hover_content = await self.server.python_delegate.get_hover(
                 source, line, col, doc.path
             )
 
@@ -365,7 +365,7 @@ This environment variable is not currently set.
 
         return False
 
-    def _get_braced_env_var_hover(
+    async def _get_braced_env_var_hover(
         self, source: str, line: int, col: int, word: str
     ) -> str | None:
         """Get hover for content inside ${...} - this is a Python expression."""
@@ -391,15 +391,15 @@ This environment variable is not currently set.
         expr_start = brace_start + 2
         word_start_in_expr = col - expr_start
 
-        # Build a synthetic source where we can query Jedi for the expression
+        # Build a synthetic source where we can query the backend for the expression
         # Keep the lines before to preserve variable definitions
         synthetic_lines = lines[:line]
-        # Add a line that just has the expression so Jedi can analyze it
+        # Add a line that just has the expression so the backend can analyze it
         synthetic_lines.append(expr)
         synthetic_source = "\n".join(synthetic_lines)
 
-        # Query Jedi for hover on the word within the expression
-        python_hover = self.server.python_delegate.get_hover(
+        # Query backend for hover on the word within the expression
+        python_hover = await self.server.python_delegate.get_hover(
             synthetic_source, line, word_start_in_expr, None
         )
 
