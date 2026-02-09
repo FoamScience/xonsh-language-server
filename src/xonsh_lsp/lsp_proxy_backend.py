@@ -79,7 +79,7 @@ class LspProxyBackend:
         self._workspace_root = workspace_root
 
         # Create and start the language client
-        self._client = LanguageClient("xonsh-lsp-proxy", "0.1.0")
+        self._client = LanguageClient("xonsh-lsp-proxy", "0.1.2")
 
         # Register diagnostics handler before starting
         @self._client.feature(lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)

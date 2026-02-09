@@ -107,7 +107,7 @@ class XonshLanguageServer(LanguageServer):
 # Create server instance
 server = XonshLanguageServer(
     name="xonsh-lsp",
-    version="0.1.0",
+    version="0.1.2",
 )
 
 
