@@ -9,12 +9,9 @@ and handles asynchronous diagnostics.
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import shutil
-import sys
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from lsprotocol import types as lsp
 from pygls.lsp.client import LanguageClient
@@ -25,6 +22,9 @@ from xonsh_lsp.preprocessing import (
     preprocess_with_mapping,
 )
 
+if TYPE_CHECKING:
+    from pygls.lsp.server import LanguageServer
+
 logger = logging.getLogger(__name__)
 
 # Known backend shortcuts
@@ -34,36 +34,6 @@ KNOWN_BACKENDS: dict[str, list[str]] = {
     "pylsp": ["pylsp"],
     "ty": ["ty", "server"],
 }
-
-
-async def _detect_python_path(workspace_root: str | None) -> str:
-    """Detect the Python interpreter path, preferring UV-managed environments.
-
-    Tries `uv python find` in the workspace root first, falling back to
-    sys.executable or shutil.which("python3").
-    """
-    if workspace_root:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "uv", "python", "find",
-                cwd=workspace_root,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
-            if proc.returncode == 0 and stdout:
-                python_path = stdout.decode().strip()
-                if python_path:
-                    logger.info(f"UV detected Python: {python_path}")
-                    return python_path
-        except (FileNotFoundError, asyncio.TimeoutError, OSError) as e:
-            logger.debug(f"UV python detection failed: {e}")
-
-    # Fall back to sys.executable or system Python
-    if sys.executable:
-        return sys.executable
-    found = shutil.which("python3") or shutil.which("python")
-    return found or "python3"
 
 
 class LspProxyBackend:
@@ -78,6 +48,7 @@ class LspProxyBackend:
         command: list[str],
         on_diagnostics: Callable[[str, list[lsp.Diagnostic]], None] | None = None,
         backend_settings: dict[str, Any] | None = None,
+        server: "LanguageServer | None" = None,
     ) -> None:
         """Initialize the proxy backend.
 
@@ -85,16 +56,18 @@ class LspProxyBackend:
             command: Command to spawn the child LSP server (e.g. ["pyright-langserver", "--stdio"]).
             on_diagnostics: Callback for asynchronous diagnostics from the backend.
                 Called with (uri, diagnostics) when the backend publishes diagnostics.
-            backend_settings: Settings to forward to the child LSP server
-                (e.g. python.analysis.* for Pyright).
+            backend_settings: Fallback settings for when the editor doesn't respond
+                to workspace/configuration requests.
+            server: The parent LanguageServer instance, used to forward
+                workspace/configuration requests from the child to the editor.
         """
         self._command = command
         self._client: LanguageClient | None = None
         self._on_diagnostics = on_diagnostics
         self._backend_settings = backend_settings or {}
+        self._server: LanguageServer | None = server
         self._doc_versions: dict[str, int] = {}
         self._workspace_root: str | None = None
-        self._python_path: str | None = None
         self._started = False
 
     async def start(self, workspace_root: str | None = None) -> None:
@@ -105,10 +78,6 @@ class LspProxyBackend:
         """
         self._workspace_root = workspace_root
 
-        # Detect Python path for the backend
-        self._python_path = await _detect_python_path(workspace_root)
-        logger.info(f"Using Python path for backend: {self._python_path}")
-
         # Create and start the language client
         self._client = LanguageClient("xonsh-lsp-proxy", "0.1.0")
 
@@ -117,12 +86,12 @@ class LspProxyBackend:
         def on_publish_diagnostics(params: lsp.PublishDiagnosticsParams) -> None:
             self._handle_diagnostics(params)
 
-        # Register workspace/configuration handler
+        # Register workspace/configuration handler — forwards to editor
         @self._client.feature(lsp.WORKSPACE_CONFIGURATION)
-        def on_workspace_configuration(
+        async def on_workspace_configuration(
             params: lsp.ConfigurationParams,
         ) -> list[Any]:
-            return self._handle_configuration_request(params)
+            return await self._handle_configuration_request(params)
 
         try:
             await self._client.start_io(*self._command)
@@ -130,14 +99,6 @@ class LspProxyBackend:
             logger.error(f"Failed to start backend: {self._command}: {e}")
             self._client = None
             return
-
-        # Build initialization settings
-        init_settings = dict(self._backend_settings)
-        if self._python_path:
-            # Set python path in settings for backends that support it
-            init_settings.setdefault("python", {})
-            if isinstance(init_settings["python"], dict):
-                init_settings["python"].setdefault("pythonPath", self._python_path)
 
         # Send initialize
         workspace_uri = Path(workspace_root).as_uri() if workspace_root else None
@@ -174,7 +135,7 @@ class LspProxyBackend:
                     ),
                     root_uri=workspace_uri,
                     workspace_folders=workspace_folders,
-                    initialization_options=init_settings if init_settings else None,
+                    initialization_options=self._backend_settings if self._backend_settings else None,
                 )
             )
             logger.info(f"Backend initialized: {result.server_info if hasattr(result, 'server_info') else 'unknown'}")
@@ -586,17 +547,33 @@ class LspProxyBackend:
         # The server's diagnostics merging layer handles the final publish.
         self._on_diagnostics(uri, diagnostics)
 
-    def _handle_configuration_request(
+    async def _handle_configuration_request(
         self, params: lsp.ConfigurationParams
     ) -> list[Any]:
         """Handle workspace/configuration requests from the child backend.
 
-        Returns configured backend settings for each requested section.
+        Forwards the request to the editor via the parent server. Falls back
+        to backendSettings if the editor doesn't respond.
         """
+        # Try forwarding to the editor
+        if self._server is not None:
+            try:
+                result = await self._server.send_request_async(
+                    lsp.WORKSPACE_CONFIGURATION, params
+                )
+                if result is not None:
+                    return result
+            except Exception as e:
+                logger.debug(f"Editor config request failed, using fallback: {e}")
+
+        # Fallback: resolve from backendSettings
+        return self._resolve_settings(params)
+
+    def _resolve_settings(self, params: lsp.ConfigurationParams) -> list[Any]:
+        """Resolve configuration from backendSettings (fallback)."""
         results = []
         for item in params.items:
             section = item.section or ""
-            # Look up the section in our backend settings
             value = self._backend_settings
             if section:
                 for part in section.split("."):
@@ -605,14 +582,5 @@ class LspProxyBackend:
                     else:
                         value = {}
                         break
-
-            # If we have a python path and this looks like a python section,
-            # ensure pythonPath is set
-            if section.startswith("python") and isinstance(value, dict):
-                if self._python_path and "pythonPath" not in value:
-                    value = dict(value)
-                    value["pythonPath"] = self._python_path
-
             results.append(value)
-
         return results
