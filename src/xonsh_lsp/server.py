@@ -64,6 +64,7 @@ class XonshLanguageServer(LanguageServer):
         self._backend_name: str = "jedi"
         self._backend_command: list[str] | None = None
         self._backend_settings: dict[str, Any] = {}
+        self._workspace_root: str | None = None
 
     @property
     def python_delegate(self) -> PythonBackend:
@@ -182,29 +183,33 @@ async def initialize(params: lsp.InitializeParams) -> None:
         if backend_settings:
             server._backend_settings = backend_settings
 
-    # Create and start the backend
+    # Create the backend (started in `initialized` after handshake completes)
     server.python_backend = _create_backend(
         server._backend_name,
         server._backend_command,
         server._backend_settings,
     )
 
-    # Determine workspace root
-    workspace_root = None
+    # Save workspace root for use in `initialized`
+    server._workspace_root = None
     if params.root_uri:
         from urllib.parse import unquote, urlparse
         parsed = urlparse(params.root_uri)
-        workspace_root = unquote(parsed.path)
+        server._workspace_root = unquote(parsed.path)
     elif params.root_path:
-        workspace_root = params.root_path
-
-    await server.python_backend.start(workspace_root)
+        server._workspace_root = params.root_path
 
 
 @server.feature(lsp.INITIALIZED)
 async def initialized(params: lsp.InitializedParams) -> None:
-    """Handle the initialized notification."""
+    """Handle the initialized notification — start the backend.
+
+    Deferred from initialize so that the editor is ready to handle
+    server-to-client requests (e.g. workspace/configuration forwarding).
+    """
     logger.info("xonsh-lsp initialized")
+    if server.python_backend is not None:
+        await server.python_backend.start(server._workspace_root)
 
 
 @server.feature(lsp.SHUTDOWN)
@@ -560,7 +565,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="xonsh-lsp 0.1.0",
+        version="xonsh-lsp 0.1.2",
     )
     parser.add_argument(
         "--python-backend",
