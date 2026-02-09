@@ -1,7 +1,7 @@
 """Tests for the definition provider."""
 
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 from lsprotocol import types as lsp
 from xonsh_lsp.definition import XonshDefinitionProvider, XonshReferenceProvider
@@ -15,7 +15,7 @@ class TestXonshDefinitionProvider:
         """Create a mock server."""
         server = MagicMock()
         server.python_delegate = MagicMock()
-        server.python_delegate.get_definitions.return_value = []
+        server.python_delegate.get_definitions = AsyncMock(return_value=[])
         return server
 
     @pytest.fixture
@@ -124,7 +124,8 @@ my_func()
         word = provider._get_word_at_position(source, 100, 0)
         assert word is None
 
-    def test_full_definition_flow(self, provider, mock_server):
+    @pytest.mark.asyncio
+    async def test_full_definition_flow(self, provider, mock_server):
         """Test full definition flow."""
         mock_doc = MagicMock()
         mock_doc.source = """
@@ -141,11 +142,12 @@ greet()
             position=lsp.Position(line=4, character=2),  # On 'greet()'
         )
 
-        result = provider.get_definition(params)
+        result = await provider.get_definition(params)
         # Should find the function definition
         assert result is not None
 
-    def test_python_definition_delegation(self, provider, mock_server):
+    @pytest.mark.asyncio
+    async def test_python_definition_delegation(self, provider, mock_server):
         """Test that Python definitions are delegated."""
         mock_doc = MagicMock()
         mock_doc.source = "import os\nos.path"
@@ -153,7 +155,7 @@ greet()
         mock_server.get_document.return_value = mock_doc
 
         # Set up mock Python definition
-        mock_server.python_delegate.get_definitions.return_value = [
+        mock_server.python_delegate.get_definitions = AsyncMock(return_value=[
             lsp.Location(
                 uri="file:///usr/lib/python/os.py",
                 range=lsp.Range(
@@ -161,14 +163,14 @@ greet()
                     end=lsp.Position(line=0, character=10),
                 ),
             )
-        ]
+        ])
 
         params = lsp.DefinitionParams(
             text_document=lsp.TextDocumentIdentifier(uri="file:///test/file.xsh"),
             position=lsp.Position(line=1, character=3),
         )
 
-        result = provider.get_definition(params)
+        result = await provider.get_definition(params)
         # Should include Python definitions
         assert result is not None
 

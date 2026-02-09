@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from lsprotocol import types as lsp
 from xonsh_lsp.hover import XonshHoverProvider
@@ -18,7 +18,7 @@ class TestXonshHoverProvider:
         server = MagicMock()
         server.parser = XonshParser()
         server.python_delegate = MagicMock()
-        server.python_delegate.get_hover.return_value = None
+        server.python_delegate.get_hover = AsyncMock(return_value=None)
         return server
 
     @pytest.fixture
@@ -112,7 +112,8 @@ class TestXonshHoverProvider:
         result = provider._is_command_context(source, 0, 3)
         assert isinstance(result, bool)
 
-    def test_hover_full_flow(self, provider, mock_server):
+    @pytest.mark.asyncio
+    async def test_hover_full_flow(self, provider, mock_server):
         """Test full hover flow with a document."""
         mock_doc = MagicMock()
         mock_doc.source = "$HOME"
@@ -124,11 +125,12 @@ class TestXonshHoverProvider:
             position=lsp.Position(line=0, character=2),
         )
 
-        hover = provider.get_hover(params)
+        hover = await provider.get_hover(params)
         # Should return hover info for $HOME
         assert hover is None or isinstance(hover, lsp.Hover)
 
-    def test_python_hover_delegation(self, provider, mock_server):
+    @pytest.mark.asyncio
+    async def test_python_hover_delegation(self, provider, mock_server):
         """Test that Python hover is delegated."""
         mock_doc = MagicMock()
         mock_doc.source = "print('hello')"
@@ -136,14 +138,14 @@ class TestXonshHoverProvider:
         mock_server.get_document.return_value = mock_doc
 
         # Set up mock Python hover
-        mock_server.python_delegate.get_hover.return_value = "Python hover content"
+        mock_server.python_delegate.get_hover = AsyncMock(return_value="Python hover content")
 
         params = lsp.HoverParams(
             text_document=lsp.TextDocumentIdentifier(uri="file:///test/file.xsh"),
             position=lsp.Position(line=0, character=2),
         )
 
-        hover = provider.get_hover(params)
+        hover = await provider.get_hover(params)
         # Should get something (either xonsh or Python hover)
         assert hover is None or isinstance(hover, lsp.Hover)
 
@@ -157,7 +159,7 @@ class TestHoverEdgeCases:
         server = MagicMock()
         server.parser = XonshParser()
         server.python_delegate = MagicMock()
-        server.python_delegate.get_hover.return_value = None
+        server.python_delegate.get_hover = AsyncMock(return_value=None)
         return server
 
     @pytest.fixture
@@ -165,7 +167,8 @@ class TestHoverEdgeCases:
         """Create a hover provider."""
         return XonshHoverProvider(mock_server)
 
-    def test_hover_empty_document(self, provider, mock_server):
+    @pytest.mark.asyncio
+    async def test_hover_empty_document(self, provider, mock_server):
         """Test hover on empty document."""
         mock_server.get_document.return_value = None
 
@@ -174,10 +177,11 @@ class TestHoverEdgeCases:
             position=lsp.Position(line=0, character=0),
         )
 
-        hover = provider.get_hover(params)
+        hover = await provider.get_hover(params)
         assert hover is None
 
-    def test_hover_out_of_range(self, provider, mock_server):
+    @pytest.mark.asyncio
+    async def test_hover_out_of_range(self, provider, mock_server):
         """Test hover at out-of-range position."""
         mock_doc = MagicMock()
         mock_doc.source = "x = 1"
@@ -189,7 +193,7 @@ class TestHoverEdgeCases:
             position=lsp.Position(line=100, character=0),
         )
 
-        hover = provider.get_hover(params)
+        hover = await provider.get_hover(params)
         assert hover is None
 
     def test_long_env_var_value_truncation(self, provider):

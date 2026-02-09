@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from lsprotocol import types as lsp
 from xonsh_lsp.completions import XonshCompletionProvider
@@ -17,7 +17,7 @@ class TestXonshCompletionProvider:
         server = MagicMock()
         server.parser = MagicMock()
         server.python_delegate = MagicMock()
-        server.python_delegate.get_completions.return_value = []
+        server.python_delegate.get_completions = AsyncMock(return_value=[])
         return server
 
     @pytest.fixture
