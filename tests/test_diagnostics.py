@@ -213,3 +213,76 @@ class TestXonshDiagnosticsProvider:
 
         assert uri not in provider._xonsh_diagnostics
         assert uri not in provider._python_diagnostics
+
+    # --- Alias extraction tests ---
+
+    def test_extract_aliases_subscript(self, provider, mock_server):
+        """Test aliases['name'] = ... pattern."""
+        source = "aliases['myapp'] = 'echo hello'"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        assert "myapp" in aliases
+
+    def test_extract_aliases_register_decorator(self, provider, mock_server):
+        """Test @aliases.register + def _name() pattern."""
+        source = "@aliases.register\ndef _myapp():\n    pass\n"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        assert "myapp" in aliases
+
+    def test_extract_aliases_register_with_name(self, provider, mock_server):
+        """Test @aliases.register("name") + def __name() pattern."""
+        source = '@aliases.register("j2y")\ndef __j2y(args):\n    pass\n'
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        assert "j2y" in aliases
+
+    # --- Split-expression diagnostics tests ---
+
+    def test_split_expression_numeric_args_bare_subprocess(self, provider, mock_server):
+        """Tree-sitter parses 'cmd 1 2 3' as bare_subprocess, so the
+        split-expression heuristic does not fire."""
+        source = "unknowncmd_xyz123 1 2 3"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        diags = provider._get_split_expression_diagnostics(source, parse_result, aliases)
+        assert len(diags) == 0
+
+    def test_split_expression_word_args_bare_subprocess(self, provider, mock_server):
+        """Tree-sitter parses 'cmd word_args' as bare_subprocess, so the
+        split-expression heuristic does not fire."""
+        source = "unknowncmd_xyz123 world"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        diags = provider._get_split_expression_diagnostics(source, parse_result, aliases)
+        assert len(diags) == 0
+
+    def test_split_expression_known_alias(self, provider, mock_server):
+        """Known alias with numeric args -> bare_subprocess, no split-expression warning."""
+        source = "aliases['args'] = lambda a: print(a)\nargs 1 2 3\n"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        diags = provider._get_split_expression_diagnostics(source, parse_result, aliases)
+        assert len(diags) == 0
+
+    def test_split_expression_known_system_command(self, provider, mock_server):
+        """System command in PATH -> no warning (tree-sitter may parse as bare_subprocess)."""
+        # Use 'echo' which is a shell builtin
+        source = "echo hello"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        diags = provider._get_split_expression_diagnostics(source, parse_result, aliases)
+        assert len(diags) == 0
+
+    def test_command_exists_with_source_aliases(self, provider):
+        """_command_exists returns True when command is in source_aliases."""
+        assert provider._command_exists("myapp_xyz", {"myapp_xyz"})
+        assert not provider._command_exists("myapp_xyz")
+
+    def test_no_split_expression_different_lines(self, provider, mock_server):
+        """Two identifiers on different lines -> no diagnostic."""
+        source = "foo\nbar\n"
+        parse_result = mock_server.parser.parse(source)
+        aliases = provider._extract_aliases_from_source(source, parse_result)
+        diags = provider._get_split_expression_diagnostics(source, parse_result, aliases)
+        assert len(diags) == 0

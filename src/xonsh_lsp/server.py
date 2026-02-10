@@ -109,7 +109,7 @@ class XonshLanguageServer(LanguageServer):
 # Create server instance
 server = XonshLanguageServer(
     name="xonsh-lsp",
-    version="0.1.4",
+    version="0.1.5",
 )
 
 
@@ -190,6 +190,14 @@ async def initialize(params: lsp.InitializeParams) -> None:
         server._backend_command,
         server._backend_settings,
     )
+
+    # Update serverInfo.name so clients can show the active backend
+    backend_label = server._backend_name
+    if backend_label != "jedi":
+        server.protocol.server_info = lsp.ServerInfo(
+            name=f"xonsh-lsp[{backend_label}]",
+            version=server.version,
+        )
 
     # Save workspace root for use in `initialized`
     server._workspace_root = None
@@ -571,7 +579,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="xonsh-lsp 0.1.3",
+        version="xonsh-lsp 0.1.5",
     )
     parser.add_argument(
         "--python-backend",

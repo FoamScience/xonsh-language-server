@@ -205,3 +205,53 @@ class TestHoverEdgeCases:
             # Should be truncated
             assert len(hover_content) < len(long_value) + 200
             assert "..." in hover_content
+
+
+class TestSourceAliasHover:
+    """Test hover for source-defined aliases."""
+
+    @pytest.fixture
+    def mock_server(self):
+        server = MagicMock()
+        server.parser = XonshParser()
+        server.python_delegate = MagicMock()
+        server.python_delegate.get_hover = AsyncMock(return_value=None)
+        return server
+
+    @pytest.fixture
+    def provider(self, mock_server):
+        return XonshHoverProvider(mock_server)
+
+    def test_subscript_alias(self, provider):
+        """aliases['myapp'] = 'echo hello' → hover finds it."""
+        source = "aliases['myapp'] = 'echo hello'\nmyapp world\n"
+        result = provider._find_source_alias_hover(source, "myapp")
+        assert result is not None
+        assert "Alias: `myapp`" in result
+        assert "line 1" in result
+        assert "'echo hello'" in result
+
+    def test_decorator_alias(self, provider):
+        """@aliases.register + def _myapp() → hover shows function."""
+        source = "@aliases.register\ndef _myapp():\n    print('hi')\n\nmyapp\n"
+        result = provider._find_source_alias_hover(source, "myapp")
+        assert result is not None
+        assert "Alias: `myapp`" in result
+        assert "Implementation" in result
+        assert "@aliases.register" in result
+        assert "def _myapp" in result
+
+    def test_decorator_named_alias(self, provider):
+        """@aliases.register("myapp") + def _impl() → hover shows function."""
+        source = '@aliases.register("myapp")\ndef _impl():\n    print("hi")\n\nmyapp\n'
+        result = provider._find_source_alias_hover(source, "myapp")
+        assert result is not None
+        assert "Alias: `myapp`" in result
+        assert "Implementation" in result
+        assert "@aliases.register" in result
+
+    def test_alias_not_found(self, provider):
+        """Unknown word → returns None."""
+        source = "aliases['other'] = 'echo hello'\n"
+        result = provider._find_source_alias_hover(source, "myapp")
+        assert result is None

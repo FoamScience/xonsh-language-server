@@ -5,7 +5,7 @@ A Language Server Protocol implementation for xonsh,
 providing intelligent code completion, diagnostics, and more.
 """
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 __author__ = "Mohammed Elwardi Fadeli"
 
 # Import on demand to avoid import errors

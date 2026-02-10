@@ -551,15 +551,15 @@ wheels = [
 
 [[package]]
 name = "tree-sitter-xonsh"
-version = "0.1.2"
+version = "0.1.5"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7f/88/e4278146b049fae56de115ec10123b2449f06569450f7e1c8164a35d5c47/tree_sitter_xonsh-0.1.2.tar.gz", hash = "sha256:18bfe72d5ecfb7986b27f2bbe6a64f87c272068bb076888632ca2f80a2ad91d7", size = 343441, upload-time = "2026-02-09T16:00:33.431Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/12/a9/a6e9432b103bb2296abb3371880bde56edc93234e7ed9f9ee3bb5ec0f284/tree_sitter_xonsh-0.1.5.tar.gz", hash = "sha256:88049417beeea2b84d18f9bff8d98939f6a9617e35007c6e8ae7fcefb329a10d", size = 344589, upload-time = "2026-02-10T23:07:48.987Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/19/67/61962ebb231faf38fccadee28a47acebb9870c03a2df2bef17acde2ca41a/tree_sitter_xonsh-0.1.2-cp38-abi3-macosx_10_9_x86_64.whl", hash = "sha256:ad95039a262ea8185e24eeb1126026346608958b7a62a5517a530c36857fe3f5", size = 130293, upload-time = "2026-02-09T16:00:26.737Z" },
-    { url = "https://files.pythonhosted.org/packages/ba/78/b98e9b0f1578098ac7a7b7bbb7e22fcea9ba6b781c83286eff19ab3b9e24/tree_sitter_xonsh-0.1.2-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:dd57dd23d4492bc6166200b8f4aa3495dc7d5b7e07cfd8d6ef3fd7d79eef20ac", size = 141578, upload-time = "2026-02-09T16:00:28.102Z" },
-    { url = "https://files.pythonhosted.org/packages/a6/b3/93bad3975f3fd3baa30b2507d8c5fe635fcf1e5baefe7b797f86b022d79a/tree_sitter_xonsh-0.1.2-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:3c7d6a0e5bb296191eeecdfa0dde74e97532d512fabe0463102e6886320b6494", size = 181877, upload-time = "2026-02-09T16:00:29.363Z" },
-    { url = "https://files.pythonhosted.org/packages/d5/c8/3abad2b39b488a1250d4598bd27d1441a34f7bdb8d595001ea90ec0f9417/tree_sitter_xonsh-0.1.2-cp38-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:56f50d26b37a5385e484dd0ae98dab7110394bd50d00cdc732515a199ba005c9", size = 170024, upload-time = "2026-02-09T16:00:30.577Z" },
-    { url = "https://files.pythonhosted.org/packages/6f/78/3d33b2b8572b275a2a9bfdd66b07287501b6cb23464efc2258c982c0d44c/tree_sitter_xonsh-0.1.2-cp38-abi3-win_amd64.whl", hash = "sha256:75bc91b4f0e474d2891f14724a8d31ca47d6f41e4a5eb6770d404c79963e4497", size = 133629, upload-time = "2026-02-09T16:00:32.194Z" },
+    { url = "https://files.pythonhosted.org/packages/0a/26/f908f1c71af9c1e12e4f4259ec82475616a7d33a27d596abc9c0760b8e7f/tree_sitter_xonsh-0.1.5-cp38-abi3-macosx_10_9_x86_64.whl", hash = "sha256:2dac3786e73cc6a1fb8b3af7c630318fbe6c05e87ee3c9203aa4a81984a12652", size = 131170, upload-time = "2026-02-10T23:07:41.229Z" },
+    { url = "https://files.pythonhosted.org/packages/65/a2/6a557a1e69256053b371b215496ba35e526fed254690b4dd014e9eff7dd9/tree_sitter_xonsh-0.1.5-cp38-abi3-macosx_11_0_arm64.whl", hash = "sha256:86d177071e8495fccdd10767a67e7faeffee44a0f5a33d2330a42fa8692ad1a5", size = 142113, upload-time = "2026-02-10T23:07:42.557Z" },
+    { url = "https://files.pythonhosted.org/packages/5a/20/440a7cd4d718ca13ec0ba36cbef52c67849f848e11b42a147d6c0c8ab4ff/tree_sitter_xonsh-0.1.5-cp38-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:e6d2db11b5a5e545ee322f7b4ab81874f6bc63ed8c6e2192c574f71ca281f29f", size = 183813, upload-time = "2026-02-10T23:07:44.291Z" },
+    { url = "https://files.pythonhosted.org/packages/02/cb/008e300b4144f798f9deb040c3787e4ca015f91ad5e6e7757f8ea230f416/tree_sitter_xonsh-0.1.5-cp38-abi3-manylinux_2_5_x86_64.manylinux1_x86_64.manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:15b62ec32064c71b1ad1ce47cf6ab660e2088034fca5ee36cde53bc325055f07", size = 172643, upload-time = "2026-02-10T23:07:46.028Z" },
+    { url = "https://files.pythonhosted.org/packages/80/33/751e1e4495316544e83e55856b3459a748bdcd2a8a02e8eaf6eff1fd9e60/tree_sitter_xonsh-0.1.5-cp38-abi3-win_amd64.whl", hash = "sha256:f585637be5ce7471848de478578aa647685b4254be4b230f4b7b3ce83b232e57", size = 134631, upload-time = "2026-02-10T23:07:47.265Z" },
 ]
 
 [[package]]
@@ -573,7 +573,7 @@ wheels = [
 
 [[package]]
 name = "xonsh-lsp"
-version = "0.1.4"
+version = "0.1.5"
 source = { editable = "." }
 dependencies = [
     { name = "cattrs" },
@@ -613,6 +613,6 @@ requires-dist = [
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "tree-sitter", specifier = ">=0.25.2" },
-    { name = "tree-sitter-xonsh", specifier = ">=0.1.1" },
+    { name = "tree-sitter-xonsh", specifier = ">=0.1.5" },
 ]
 provides-extras = ["jedi", "all", "dev"]
