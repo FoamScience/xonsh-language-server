@@ -500,9 +500,12 @@ class LspProxyBackend:
 
             # Extract markdown content
             if isinstance(result.contents, lsp.MarkupContent):
+                if result.contents.kind == lsp.MarkupKind.PlainText:
+                    # Wrap plaintext (e.g. type signatures from ty) in a code fence
+                    return f"```python\n{result.contents.value}\n```"
                 return result.contents.value
             elif isinstance(result.contents, str):
-                return result.contents
+                return f"```python\n{result.contents}\n```"
             elif isinstance(result.contents, list):
                 parts = []
                 for item in result.contents:
