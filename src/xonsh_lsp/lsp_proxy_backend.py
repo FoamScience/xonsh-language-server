@@ -199,6 +199,21 @@ class LspProxyBackend:
         def on_log_message(params: lsp.LogMessageParams) -> None:
             self._handle_log_message(params)
 
+        # Guard against pygls setting results on already-cancelled futures.
+        # This happens when Zed cancels a request (e.g. cursor moved) but the
+        # child LSP (ty) response arrives afterward.
+        _orig_handle_response = self._client.protocol._handle_response
+
+        def _safe_handle_response(msg_id, result=None, error=None):
+            future = self._client.protocol._request_futures.get(msg_id)
+            if future is not None and future.cancelled():
+                logger.debug("Dropping response for cancelled request %s", msg_id)
+                self._client.protocol._request_futures.pop(msg_id, None)
+                return
+            _orig_handle_response(msg_id, result, error)
+
+        self._client.protocol._handle_response = _safe_handle_response
+
         try:
             await self._client.start_io(*self._command)
             logger.info("PROXY: child process spawned")
