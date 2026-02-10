@@ -24,9 +24,10 @@ if TYPE_CHECKING:
     from pygls.workspace import TextDocument
     from xonsh_lsp.python_backend import PythonBackend
 
-# Configure logging
+# Configure logging — WARNING by default to avoid flooding stderr
+# (Neovim treats all stderr as [ERROR])
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
 logger = logging.getLogger(__name__)
@@ -207,9 +208,17 @@ async def initialized(params: lsp.InitializedParams) -> None:
     Deferred from initialize so that the editor is ready to handle
     server-to-client requests (e.g. workspace/configuration forwarding).
     """
-    logger.info("xonsh-lsp initialized")
     if server.python_backend is not None:
         await server.python_backend.start(server._workspace_root)
+
+        # Re-sync documents that were opened while the backend was starting.
+        # Editors often send textDocument/didOpen before start() finishes,
+        # and the proxy backend drops those (self._started is still False).
+        for uri in list(server.workspace.text_documents):
+            diagnostics = await server.diagnostics_provider.get_diagnostics(uri)
+            server.text_document_publish_diagnostics(
+                lsp.PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
+            )
 
 
 @server.feature(lsp.SHUTDOWN)
@@ -403,15 +412,12 @@ async def document_symbols(
 ) -> list[lsp.DocumentSymbol] | list[lsp.SymbolInformation] | None:
     """Provide document symbols."""
     uri = params.text_document.uri
-    logger.info(f"Document symbols requested for {uri}")
     doc = server.get_document(uri)
     if doc is None:
-        logger.warning(f"No document found for {uri}")
         return None
 
     # Use tree-sitter for symbol extraction (handles xonsh syntax)
     raw_symbols = server.parser.get_document_symbols(doc.source)
-    logger.info(f"Found {len(raw_symbols)} symbols from tree-sitter")
 
     # Convert to LSP DocumentSymbol format
     kind_map = {
@@ -559,8 +565,8 @@ def main() -> None:
     parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
-        default="INFO",
-        help="Set the logging level",
+        default="WARNING",
+        help="Set the logging level (default: WARNING)",
     )
     parser.add_argument(
         "--version",
