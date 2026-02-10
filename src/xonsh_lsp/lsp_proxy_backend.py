@@ -10,13 +10,15 @@ and handles asynchronous diagnostics.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from lsprotocol import types as lsp
 from pygls.lsp.client import LanguageClient
 
 from xonsh_lsp.preprocessing import (
+    PreprocessResult,
     map_position_from_processed,
     map_position_to_processed,
     preprocess_with_mapping,
@@ -34,6 +36,32 @@ KNOWN_BACKENDS: dict[str, list[str]] = {
     "pylsp": ["pylsp"],
     "ty": ["ty", "server"],
 }
+
+# Stub declarations prepended to preprocessed source so the child backend
+# recognises xonsh placeholder variables (__xonsh_env__, etc.) and xonsh
+# Path extensions (.cd(), .mkdir() returning self, etc.).
+_XONSH_PREAMBLE_LINES = [
+    "import typing as __xonsh_typing__",
+    "__xonsh_env__: dict[str, __xonsh_typing__.Any] = {}",
+    "__xonsh_subproc__: __xonsh_typing__.Any = None",
+    "__xonsh_at__: __xonsh_typing__.Any = None",
+    "class __xonsh_Path__:",
+    "    def __init__(self, *a: __xonsh_typing__.Any) -> None: ...",
+    "    def __getattr__(self, name: str) -> __xonsh_typing__.Any: ...",
+    "    def __truediv__(self, o: __xonsh_typing__.Any) -> '__xonsh_Path__': ...",
+    "    def __enter__(self) -> '__xonsh_Path__': ...",
+    "    def __exit__(self, *a: __xonsh_typing__.Any) -> None: ...",
+]
+_XONSH_PREAMBLE = "\n".join(_XONSH_PREAMBLE_LINES) + "\n"
+_XONSH_PREAMBLE_LINE_COUNT = len(_XONSH_PREAMBLE_LINES)
+
+
+@dataclass
+class _SyncState:
+    """Per-document synchronization state stored after each sync."""
+
+    preprocess_result: PreprocessResult
+    preamble_lines: int = 0
 
 
 class LspProxyBackend:
@@ -67,8 +95,10 @@ class LspProxyBackend:
         self._backend_settings = backend_settings or {}
         self._server: LanguageServer | None = server
         self._doc_versions: dict[str, int] = {}
+        self._uri_map: dict[str, str] = {}  # py_uri -> original_uri
         self._workspace_root: str | None = None
         self._started = False
+        self._sync_state: dict[str, _SyncState] = {}  # uri -> per-doc state
 
     async def start(self, workspace_root: str | None = None) -> None:
         """Start the child LSP server.
@@ -77,9 +107,11 @@ class LspProxyBackend:
         handlers for notifications from the child.
         """
         self._workspace_root = workspace_root
+        logger.info(f"PROXY: starting child: command={self._command}, workspace={workspace_root}")
 
         # Create and start the language client
         self._client = LanguageClient("xonsh-lsp-proxy", "0.1.3")
+        _patch_converter(self._client.protocol._converter)
 
         # Register diagnostics handler before starting
         @self._client.feature(lsp.TEXT_DOCUMENT_PUBLISH_DIAGNOSTICS)
@@ -93,10 +125,27 @@ class LspProxyBackend:
         ) -> list[Any]:
             return await self._handle_configuration_request(params)
 
+        # Forward progress notifications from child to editor
+        @self._client.feature(lsp.WINDOW_WORK_DONE_PROGRESS_CREATE)
+        async def on_work_done_progress_create(
+            params: lsp.WorkDoneProgressCreateParams,
+        ) -> None:
+            await self._handle_progress_create(params)
+
+        @self._client.feature(lsp.PROGRESS)
+        def on_progress(params: lsp.ProgressParams) -> None:
+            self._handle_progress(params)
+
+        # Forward window/logMessage from child (avoids "unknown method" warnings)
+        @self._client.feature(lsp.WINDOW_LOG_MESSAGE)
+        def on_log_message(params: lsp.LogMessageParams) -> None:
+            self._handle_log_message(params)
+
         try:
             await self._client.start_io(*self._command)
+            logger.info("PROXY: child process spawned")
         except Exception as e:
-            logger.error(f"Failed to start backend: {self._command}: {e}")
+            logger.error(f"PROXY: Failed to start backend: {self._command}: {e}")
             self._client = None
             return
 
@@ -117,7 +166,7 @@ class LspProxyBackend:
                     capabilities=lsp.ClientCapabilities(
                         text_document=lsp.TextDocumentClientCapabilities(
                             completion=lsp.CompletionClientCapabilities(
-                                completion_item=lsp.CompletionClientCapabilitiesCompletionItemType(
+                                completion_item=lsp.ClientCompletionItemOptions(
                                     snippet_support=True,
                                 ),
                             ),
@@ -132,22 +181,34 @@ class LspProxyBackend:
                             configuration=True,
                             workspace_folders=True,
                         ),
+                        window=lsp.WindowClientCapabilities(
+                            work_done_progress=True,
+                        ),
                     ),
                     root_uri=workspace_uri,
                     workspace_folders=workspace_folders,
                     initialization_options=self._backend_settings if self._backend_settings else None,
                 )
             )
-            logger.info(f"Backend initialized: {result.server_info if hasattr(result, 'server_info') else 'unknown'}")
+            server_info = getattr(result, 'server_info', None)
+            logger.info(f"PROXY: backend initialized: {server_info}")
         except Exception as e:
-            logger.error(f"Backend initialization failed: {e}")
+            logger.error(f"PROXY: initialization failed: {e}")
             await self._try_stop_client()
             return
 
         # Send initialized notification
         self._client.initialized(lsp.InitializedParams())
+
+        # Nudge the backend to request workspace/configuration.
+        # Some backends (e.g. Pyright) don't send workspace/configuration
+        # after initialized unless prompted by didChangeConfiguration.
+        self._client.workspace_did_change_configuration(
+            lsp.DidChangeConfigurationParams(settings={})
+        )
+
         self._started = True
-        logger.info(f"LSP proxy backend started: {' '.join(self._command)}")
+        logger.info(f"PROXY: backend ready: {' '.join(self._command)}")
 
     async def stop(self) -> None:
         """Stop the child LSP server."""
@@ -164,7 +225,7 @@ class LspProxyBackend:
         except Exception as e:
             logger.debug(f"Error during backend shutdown: {e}")
         try:
-            self._client.stop()
+            await self._client.stop()
         except Exception:
             pass
         self._client = None
@@ -181,25 +242,61 @@ class LspProxyBackend:
             logger.debug(f"Failed to forward settings: {e}")
 
     def _file_uri(self, path: str | None) -> str:
-        """Convert a file path to a URI."""
+        """Convert a file path to a URI with .py extension.
+
+        Backends like Pyright ignore files without a .py extension,
+        so we rewrite .xsh/.xonshrc URIs to .py for the child.
+        """
         if path is None:
             return "file:///untitled.py"
-        return Path(path).as_uri()
+        p = Path(path)
+        if p.suffix in (".xsh", ".xonshrc") or p.name in (".xonshrc", "xonshrc"):
+            p = p.with_suffix(".py")
+        return p.as_uri()
 
     def _sync_document(self, source: str, path: str | None) -> tuple[str, str]:
         """Synchronize document content with the child LSP server.
 
-        Preprocesses xonsh source to Python and sends didOpen/didChange
-        to the child backend.
+        Preprocesses xonsh source to Python, masks xonsh-only lines,
+        prepends stub declarations, and sends didOpen/didChange to the child.
 
         Returns:
-            Tuple of (uri, preprocessed_source).
+            Tuple of (uri, final_source_sent_to_child).
         """
         if self._client is None:
             return ("", "")
 
         preprocess_result = preprocess_with_mapping(source)
+        masked_source = preprocess_result.source
+
+        # Replace Path( with __xonsh_Path__( so xonsh Path extensions
+        # (.cd(), .mkdir() returning self, etc.) don't cause false errors.
+        has_xonsh_path = "Path(" in masked_source
+        if has_xonsh_path:
+            masked_source = masked_source.replace("Path(", "__xonsh_Path__(")
+
+        # Prepend stub declarations when xonsh placeholders or Path are present
+        preamble_lines = 0
+        if has_xonsh_path or any(
+            p in preprocess_result.source
+            for p in ("__xonsh_env__", "__xonsh_subproc__", "__xonsh_at__")
+        ):
+            masked_source = _XONSH_PREAMBLE + masked_source
+            preamble_lines = _XONSH_PREAMBLE_LINE_COUNT
+
         uri = self._file_uri(path)
+
+        # Store per-document state for position mapping in diagnostics
+        self._sync_state[uri] = _SyncState(
+            preprocess_result=preprocess_result,
+            preamble_lines=preamble_lines,
+        )
+
+        # Track mapping from .py URI back to original URI
+        if path is not None:
+            original_uri = Path(path).as_uri()
+            if uri != original_uri:
+                self._uri_map[uri] = original_uri
 
         if uri not in self._doc_versions:
             # First time seeing this document - send didOpen
@@ -210,7 +307,7 @@ class LspProxyBackend:
                         uri=uri,
                         language_id="python",
                         version=self._doc_versions[uri],
-                        text=preprocess_result.source,
+                        text=masked_source,
                     )
                 )
             )
@@ -225,13 +322,18 @@ class LspProxyBackend:
                     ),
                     content_changes=[
                         lsp.TextDocumentContentChangeWholeDocument(
-                            text=preprocess_result.source,
+                            text=masked_source,
                         )
                     ],
                 )
             )
 
-        return uri, preprocess_result.source
+        return uri, masked_source
+
+    def _preamble_offset(self, uri: str) -> int:
+        """Return the number of preamble lines added for a document."""
+        state = self._sync_state.get(uri)
+        return state.preamble_lines if state else 0
 
     async def get_completions(
         self, source: str, line: int, col: int, path: str | None = None
@@ -248,6 +350,7 @@ class LspProxyBackend:
             mapped_line, mapped_col = map_position_to_processed(
                 preprocess_result, line, col
             )
+            mapped_line += self._preamble_offset(uri)
 
             result = await self._client.text_document_completion_async(
                 lsp.CompletionParams(
@@ -273,7 +376,7 @@ class LspProxyBackend:
             return items
 
         except Exception as e:
-            logger.debug(f"Proxy completion error: {e}")
+            logger.debug(f"PROXY: completion error: {e}")
             return []
 
     async def get_hover(
@@ -291,6 +394,7 @@ class LspProxyBackend:
             mapped_line, mapped_col = map_position_to_processed(
                 preprocess_result, line, col
             )
+            mapped_line += self._preamble_offset(uri)
 
             result = await self._client.text_document_hover_async(
                 lsp.HoverParams(
@@ -337,6 +441,7 @@ class LspProxyBackend:
             mapped_line, mapped_col = map_position_to_processed(
                 preprocess_result, line, col
             )
+            mapped_line += self._preamble_offset(uri)
 
             result = await self._client.text_document_definition_async(
                 lsp.DefinitionParams(
@@ -366,6 +471,7 @@ class LspProxyBackend:
             mapped_line, mapped_col = map_position_to_processed(
                 preprocess_result, line, col
             )
+            mapped_line += self._preamble_offset(uri)
 
             result = await self._client.text_document_references_async(
                 lsp.ReferenceParams(
@@ -461,6 +567,7 @@ class LspProxyBackend:
             mapped_line, mapped_col = map_position_to_processed(
                 preprocess_result, line, col
             )
+            mapped_line += self._preamble_offset(uri)
 
             result = await self._client.text_document_signature_help_async(
                 lsp.SignatureHelpParams(
@@ -484,10 +591,13 @@ class LspProxyBackend:
         """Normalize definition/reference results to a list of Locations.
 
         Maps positions back from preprocessed to original coordinates for
-        locations in the same file.
+        locations in the same file, accounting for the preamble offset.
         """
         if result is None:
             return []
+
+        uri = self._file_uri(path)
+        preamble = self._preamble_offset(uri)
 
         locations: list[lsp.Location] = []
         items = result if isinstance(result, list) else [result]
@@ -504,16 +614,15 @@ class LspProxyBackend:
                 continue
 
             # Map positions back if this is the same file
-            uri = self._file_uri(path)
             if loc.uri == uri and preprocess_result is not None:
                 start_line, start_col = map_position_from_processed(
                     preprocess_result,
-                    loc.range.start.line,
+                    loc.range.start.line - preamble,
                     loc.range.start.character,
                 )
                 end_line, end_col = map_position_from_processed(
                     preprocess_result,
-                    loc.range.end.line,
+                    loc.range.end.line - preamble,
                     loc.range.end.character,
                 )
                 loc = lsp.Location(
@@ -531,21 +640,114 @@ class LspProxyBackend:
     def _handle_diagnostics(self, params: lsp.PublishDiagnosticsParams) -> None:
         """Handle diagnostics published by the child LSP server.
 
-        Maps diagnostic positions back from preprocessed to original coordinates
-        and forwards to the callback.
+        Maps diagnostic positions back from preprocessed to original coordinates,
+        filters out diagnostics on masked (xonsh-only) lines, and forwards to
+        the callback.
         """
         if self._on_diagnostics is None:
             return
 
-        uri = params.uri
-        diagnostics = params.diagnostics or []
+        # Map .py URI back to original .xsh URI
+        original_uri = self._uri_map.get(params.uri, params.uri)
+        raw_diagnostics = params.diagnostics or []
 
-        # We need the preprocess result for position mapping, but we may not
-        # have it cached. For diagnostics, the positions are already in the
-        # preprocessed source coordinates. Since we don't have a convenient way
-        # to get the original source back, we forward diagnostics as-is.
-        # The server's diagnostics merging layer handles the final publish.
-        self._on_diagnostics(uri, diagnostics)
+        state = self._sync_state.get(params.uri)
+        if state is None:
+            # No sync state — forward as-is (shouldn't normally happen)
+            self._on_diagnostics(original_uri, raw_diagnostics)
+            return
+
+        preamble = state.preamble_lines
+        pp = state.preprocess_result
+        masked = pp.masked_lines
+
+        adjusted: list[lsp.Diagnostic] = []
+        for diag in raw_diagnostics:
+            # Subtract preamble offset
+            start_line = diag.range.start.line - preamble
+            end_line = diag.range.end.line - preamble
+            if start_line < 0:
+                continue  # diagnostic is on a preamble stub line — skip
+
+            # Map from preprocessed coordinates back to original
+            orig_start_line, orig_start_col = map_position_from_processed(
+                pp, start_line, diag.range.start.character
+            )
+            orig_end_line, orig_end_col = map_position_from_processed(
+                pp, end_line, diag.range.end.character
+            )
+
+            # Skip diagnostics whose start line falls on a masked xonsh line
+            if orig_start_line in masked:
+                continue
+
+            adjusted.append(
+                lsp.Diagnostic(
+                    range=lsp.Range(
+                        start=lsp.Position(line=orig_start_line, character=orig_start_col),
+                        end=lsp.Position(line=orig_end_line, character=orig_end_col),
+                    ),
+                    message=diag.message,
+                    severity=diag.severity,
+                    code=diag.code,
+                    source=diag.source,
+                    related_information=diag.related_information,
+                    tags=diag.tags,
+                    code_description=diag.code_description,
+                    data=diag.data,
+                )
+            )
+
+        self._on_diagnostics(original_uri, adjusted)
+
+    def _handle_log_message(self, params: lsp.LogMessageParams) -> None:
+        """Forward window/logMessage from child to parent logger."""
+        level_map = {
+            lsp.MessageType.Error: logging.ERROR,
+            lsp.MessageType.Warning: logging.WARNING,
+            lsp.MessageType.Info: logging.INFO,
+            lsp.MessageType.Log: logging.DEBUG,
+            lsp.MessageType.Debug: logging.DEBUG,
+        }
+        level = level_map.get(params.type, logging.DEBUG)
+        logger.log(level, f"[backend] {params.message}")
+
+    async def _handle_progress_create(
+        self, params: lsp.WorkDoneProgressCreateParams
+    ) -> None:
+        """Forward window/workDoneProgress/create from child to editor."""
+        if self._server is None:
+            return
+        try:
+            token = params.token
+            logger.debug(f"PROXY: forwarding progress create: token={token}")
+            await self._server.work_done_progress.create_async(token)
+        except Exception as e:
+            logger.debug(f"PROXY: progress create forward failed: {e}")
+
+    def _handle_progress(self, params: lsp.ProgressParams) -> None:
+        """Forward $/progress notifications from child to editor."""
+        if self._server is None:
+            return
+        try:
+            token = params.token
+            value = params.value
+            logger.debug(f"PROXY: forwarding progress: token={token}")
+            progress = self._server.work_done_progress
+            if isinstance(value, lsp.WorkDoneProgressBegin):
+                progress.begin(token, value)
+            elif isinstance(value, lsp.WorkDoneProgressReport):
+                progress.report(token, value)
+            elif isinstance(value, lsp.WorkDoneProgressEnd):
+                progress.end(token, value)
+            else:
+                # Raw dict from JSON — forward as-is via low-level notify
+                self._server.protocol.notify(
+                    lsp.PROGRESS,
+                    lsp.ProgressParams(token=token, value=value),
+                )
+        except Exception as e:
+            logger.debug(f"PROXY: progress forward failed: {e}")
 
     async def _handle_configuration_request(
         self, params: lsp.ConfigurationParams
@@ -558,13 +760,15 @@ class LspProxyBackend:
         # Try forwarding to the editor
         if self._server is not None:
             try:
+                logger.debug(f"PROXY: forwarding config request to editor: {[i.section for i in params.items]}")
                 result = await self._server.send_request_async(
                     lsp.WORKSPACE_CONFIGURATION, params
                 )
+                logger.debug(f"PROXY: editor returned config: {result}")
                 if result is not None:
                     return result
             except Exception as e:
-                logger.debug(f"Editor config request failed, using fallback: {e}")
+                logger.debug(f"PROXY: editor config request failed, using fallback: {e}")
 
         # Fallback: resolve from backendSettings
         return self._resolve_settings(params)
