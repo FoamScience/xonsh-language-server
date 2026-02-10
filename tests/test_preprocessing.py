@@ -4,10 +4,7 @@ import pytest
 from xonsh_lsp.preprocessing import (
     PreprocessResult,
     _build_line_mapping,
-    _find_balanced_end,
     _map_column,
-    _replace_balanced_patterns,
-    has_xonsh_syntax,
     map_position_from_processed,
     map_position_to_processed,
     preprocess_source,
@@ -62,15 +59,28 @@ class TestPreprocessSource:
 
     def test_glob(self):
         result = preprocess_source("x = `*.py`")
-        assert '"__glob__"' in result
+        assert '[""]' in result
 
     def test_named_glob(self):
         result = preprocess_source("x = g`*.txt`")
-        assert '"__glob__"' in result
+        assert '[""]' in result
 
     def test_formatted_glob(self):
         result = preprocess_source("x = f`*.{ext}`")
-        assert '"__glob__"' in result
+        assert '[""]' in result
+
+    def test_path_glob(self):
+        result = preprocess_source("for f in gp`*.*`:")
+        assert '[Path("")]' in result
+
+    def test_glob_path_compound(self):
+        result = preprocess_source("for f in gp`*.*`:")
+        assert '[Path("")]' in result
+        assert "gPath" not in result  # should not leak prefix
+
+    def test_regex_path_glob(self):
+        result = preprocess_source("x = rp`.*\\.py`")
+        assert '[Path("")]' in result
 
     def test_path_literal(self):
         result = preprocess_source('x = p"/home/user"')
@@ -93,7 +103,6 @@ class TestPreprocessSource:
     def test_xontrib_statement(self):
         result = preprocess_source("xontrib load vox z")
         assert "pass" in result
-        assert "xontrib" not in result or "# xontrib" in result
 
     def test_pure_python_preserved(self):
         source = "import os\nx = 1 + 2\ndef foo(): pass"
@@ -105,6 +114,27 @@ class TestPreprocessSource:
     def test_nested_subprocess(self):
         result = preprocess_source("$(echo $(inner))")
         assert "__xonsh_subproc__" in result
+
+    def test_string_not_transformed(self):
+        """Xonsh syntax inside string literals should NOT be transformed."""
+        result = preprocess_source('x = "echo $HOME"')
+        assert '__xonsh_env__' not in result
+        assert '"echo $HOME"' in result
+
+    def test_env_assignment(self):
+        """$VAR = value should transform $VAR but preserve the assignment."""
+        result = preprocess_source('$HOME = "/home/me"')
+        assert '__xonsh_env__["HOME"]' in result
+        assert '"/home/me"' in result
+
+    def test_env_deletion(self):
+        """del $VAR should transform $VAR."""
+        result = preprocess_source('del $HOME')
+        assert '__xonsh_env__["HOME"]' in result
+
+    def test_custom_function_glob(self):
+        result = preprocess_source("x = @func`pattern`")
+        assert '[""]' in result
 
 
 class TestPreprocessWithMapping:
@@ -147,6 +177,92 @@ class TestPreprocessWithMapping:
         assert mapped[0] == 1
 
 
+class TestPreprocessResultNewFields:
+    """Test the new masked_lines and xonsh_lines fields."""
+
+    def test_masked_lines_for_bare_subprocess(self):
+        result = preprocess_with_mapping("import os\ncd /tmp\nx = 1")
+        assert 1 in result.masked_lines
+        assert 0 not in result.masked_lines
+        assert 2 not in result.masked_lines
+
+    def test_xonsh_lines_for_replaceable(self):
+        result = preprocess_with_mapping("x = $HOME\ny = 1")
+        assert 0 in result.xonsh_lines
+        assert 1 not in result.xonsh_lines
+
+    def test_xonsh_lines_for_masked(self):
+        result = preprocess_with_mapping("cd /tmp")
+        assert 0 in result.xonsh_lines
+        assert 0 in result.masked_lines
+
+    def test_env_assignment_transparency(self):
+        """env_assignment should descend into children (env_variable is replaced)."""
+        result = preprocess_with_mapping('$HOME = "/home/me"')
+        assert '__xonsh_env__["HOME"]' in result.source
+        assert 0 in result.xonsh_lines
+
+    def test_env_deletion_transparency(self):
+        """env_deletion should descend into children."""
+        result = preprocess_with_mapping('del $HOME')
+        assert '__xonsh_env__["HOME"]' in result.source
+        assert 0 in result.xonsh_lines
+
+    def test_multiple_constructs_per_line(self):
+        result = preprocess_with_mapping("print($HOME, $PATH)")
+        assert '__xonsh_env__["HOME"]' in result.source
+        assert '__xonsh_env__["PATH"]' in result.source
+        assert 0 in result.xonsh_lines
+
+    def test_pure_python_no_xonsh_lines(self):
+        result = preprocess_with_mapping("x = 1\ndef foo(): pass")
+        assert len(result.xonsh_lines) == 0
+        assert len(result.masked_lines) == 0
+
+    def test_bare_subprocess_masked_with_indent(self):
+        result = preprocess_with_mapping("if True:\n    cd /tmp\n    x = 1")
+        lines = result.source.split("\n")
+        assert lines[1] == "    pass"
+        assert 1 in result.masked_lines
+
+    def test_multiple_bare_subprocesses(self):
+        result = preprocess_with_mapping("cd /tmp\necho hello\nls -la")
+        lines = result.source.split("\n")
+        assert all(line == "pass" for line in lines)
+        assert result.masked_lines == {0, 1, 2}
+
+    def test_env_scoped_command_masked(self):
+        result = preprocess_with_mapping("import os\n$CONCH='snail' ls\nx = 1")
+        lines = result.source.split("\n")
+        assert lines[0] == "import os"
+        assert lines[1] == "pass"
+        assert lines[2] == "x = 1"
+        assert 1 in result.masked_lines
+
+    def test_help_expression_masked(self):
+        result = preprocess_with_mapping("os.path?")
+        assert 0 in result.masked_lines
+
+    def test_super_help_expression_masked(self):
+        result = preprocess_with_mapping("os.path??")
+        assert 0 in result.masked_lines
+
+    def test_xontrib_masked(self):
+        result = preprocess_with_mapping("xontrib load vox z")
+        assert 0 in result.masked_lines
+
+    def test_line_count_preserved_after_masking(self):
+        source = "import os\ncd /tmp\necho hello\nls -la\nx = 1"
+        result = preprocess_with_mapping(source)
+        assert len(result.source.split("\n")) == len(source.split("\n"))
+
+    def test_empty_source(self):
+        result = preprocess_with_mapping("")
+        assert result.source == ""
+        assert len(result.masked_lines) == 0
+        assert len(result.xonsh_lines) == 0
+
+
 class TestBuildLineMapping:
     """Test the _build_line_mapping function."""
 
@@ -176,99 +292,3 @@ class TestMapColumn:
     def test_past_end(self):
         mapping = [(0, 0), (5, 10)]
         assert _map_column(10, mapping) == 10
-
-
-class TestFindBalancedEnd:
-    """Test the _find_balanced_end function."""
-
-    def test_simple_parens(self):
-        assert _find_balanced_end("(hello)", 1, "(", ")") == 6
-
-    def test_nested_parens(self):
-        assert _find_balanced_end("(a(b)c)", 1, "(", ")") == 6
-
-    def test_brackets(self):
-        assert _find_balanced_end("[hello]", 1, "[", "]") == 6
-
-    def test_unbalanced(self):
-        assert _find_balanced_end("(hello", 1, "(", ")") == -1
-
-    def test_with_strings(self):
-        assert _find_balanced_end('("hello")', 1, "(", ")") == 8
-
-    def test_with_escaped_chars(self):
-        assert _find_balanced_end(r'(a\)b)', 1, "(", ")") == 5
-
-
-class TestReplaceBalancedPatterns:
-    """Test the _replace_balanced_patterns function."""
-
-    def test_captured_subprocess(self):
-        result = _replace_balanced_patterns("$(ls)")
-        assert result == "__xonsh_subproc__()"
-
-    def test_subprocess_object(self):
-        result = _replace_balanced_patterns("!(cmd)")
-        assert result == "__xonsh_subproc__()"
-
-    def test_python_eval_preserves_expr(self):
-        result = _replace_balanced_patterns("@(expr)")
-        assert result == "(expr)"
-
-    def test_tokenized_substitution(self):
-        result = _replace_balanced_patterns("@$(cmd)")
-        assert result == "__xonsh_subproc__()"
-
-    def test_mixed_text(self):
-        result = _replace_balanced_patterns("x = $(ls) + 1")
-        assert "__xonsh_subproc__" in result
-        assert "x = " in result
-        assert " + 1" in result
-
-
-class TestHasXonshSyntax:
-    """Test the has_xonsh_syntax function."""
-
-    def test_env_var(self):
-        assert has_xonsh_syntax("print($HOME)")
-
-    def test_subprocess(self):
-        assert has_xonsh_syntax("$(ls)")
-
-    def test_glob(self):
-        assert has_xonsh_syntax("`*.py`")
-
-    def test_at_object(self):
-        assert has_xonsh_syntax("@.imp")
-
-    def test_xontrib(self):
-        assert has_xonsh_syntax("xontrib load vox")
-
-    def test_macro(self):
-        assert has_xonsh_syntax("func!(args)")
-
-    def test_shell_operators(self):
-        assert has_xonsh_syntax("cmd1 && cmd2")
-        assert has_xonsh_syntax("cmd1 || cmd2")
-
-    def test_pipe(self):
-        assert has_xonsh_syntax("cmd1 | cmd2")
-
-    def test_flags(self):
-        assert has_xonsh_syntax("cmd -v")
-        assert has_xonsh_syntax("cmd --verbose")
-
-    def test_path_like_command(self):
-        assert has_xonsh_syntax("./script.sh")
-        assert has_xonsh_syntax("/usr/bin/cmd")
-        assert has_xonsh_syntax("~/bin/cmd")
-
-    def test_redirects(self):
-        assert has_xonsh_syntax("cmd > file")
-        assert has_xonsh_syntax("cmd 2> file")
-        assert has_xonsh_syntax("cmd &> file")
-
-    def test_pure_python(self):
-        assert not has_xonsh_syntax("x = 1 + 2")
-        assert not has_xonsh_syntax("def foo(): pass")
-        assert not has_xonsh_syntax("import os")

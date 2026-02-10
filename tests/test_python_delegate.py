@@ -3,7 +3,7 @@
 import pytest
 from xonsh_lsp.python_delegate import PythonDelegate, JEDI_AVAILABLE
 from xonsh_lsp.jedi_backend import JediBackend
-from xonsh_lsp.preprocessing import preprocess_source, has_xonsh_syntax
+from xonsh_lsp.preprocessing import preprocess_source
 
 
 class TestPythonDelegatePreprocessing:
@@ -96,14 +96,14 @@ class TestPythonDelegatePreprocessing:
         """Test preprocessing regex glob."""
         source = 'files = `.*\\.py$`'
         result = preprocess_source(source)
-        assert '"__glob__"' in result
+        assert '[""]' in result
         assert "`" not in result
 
     def test_preprocess_glob_pattern(self, delegate):
         """Test preprocessing glob pattern."""
         source = "files = g`*.txt`"
         result = preprocess_source(source)
-        assert '"__glob__"' in result
+        assert '[""]' in result
         assert "g`" not in result
 
     def test_preprocess_path_literal(self, delegate):
@@ -149,34 +149,6 @@ def process():
         assert "__xonsh_subproc__" in result
         assert "def process():" in result
 
-    def test_has_xonsh_syntax_env_var(self, delegate):
-        """Test xonsh syntax detection for env vars."""
-        assert has_xonsh_syntax("print($HOME)")
-        assert has_xonsh_syntax("x = ${PATH}")
-
-    def test_has_xonsh_syntax_subprocess(self, delegate):
-        """Test xonsh syntax detection for subprocesses."""
-        assert has_xonsh_syntax("$(ls)")
-        assert has_xonsh_syntax("!(git status)")
-        assert has_xonsh_syntax("$[echo]")
-        assert has_xonsh_syntax("![make]")
-
-    def test_has_xonsh_syntax_glob(self, delegate):
-        """Test xonsh syntax detection for globs."""
-        assert has_xonsh_syntax("`*.py`")
-        assert has_xonsh_syntax("g`*.txt`")
-
-    def test_has_xonsh_syntax_python_eval(self, delegate):
-        """Test xonsh syntax detection for Python eval."""
-        assert has_xonsh_syntax("@(name)")
-        assert has_xonsh_syntax("@$(cmd)")
-
-    def test_has_xonsh_syntax_pure_python(self, delegate):
-        """Test that pure Python is not flagged as xonsh."""
-        assert not has_xonsh_syntax("x = 1 + 2")
-        assert not has_xonsh_syntax("def foo(): pass")
-        assert not has_xonsh_syntax("import os")
-
 
 class TestBackwardsCompatibility:
     """Test that PythonDelegate is a proper alias for JediBackend."""
@@ -221,12 +193,11 @@ z = $(invalid python on this line too
 """
         diagnostics = await delegate.get_diagnostics(source)
         # Should not report errors on lines with xonsh syntax
+        from xonsh_lsp.preprocessing import preprocess_with_mapping
+        xonsh_lines = preprocess_with_mapping(source).xonsh_lines
         for diag in diagnostics:
             line = diag.range.start.line
-            lines = source.splitlines()
-            if line < len(lines):
-                assert not has_xonsh_syntax(lines[line]) or \
-                       "xonsh" not in diag.message.lower()
+            assert line not in xonsh_lines
 
     @pytest.mark.asyncio
     async def test_hover_with_xonsh_source(self, delegate):
