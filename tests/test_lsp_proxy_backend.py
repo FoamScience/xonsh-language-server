@@ -1,10 +1,24 @@
 """Tests for the LSP proxy backend."""
 
+import os
 import pytest
+from pathlib import Path, PurePosixPath
 from unittest.mock import AsyncMock, MagicMock
 
 from lsprotocol import types as lsp
 from xonsh_lsp.lsp_proxy_backend import LspProxyBackend, KNOWN_BACKENDS
+
+
+def _test_path(name: str) -> str:
+    """Return an absolute path suitable for the current platform.
+
+    On Windows ``Path(_test_path("file.py"))`` is relative (no drive letter) and
+    ``Path.as_uri()`` raises ``ValueError``.  This helper builds a proper
+    absolute path that works on every OS.
+    """
+    if os.name == "nt":
+        return f"C:\\test\\{name}"
+    return f"/test/{name}"
 
 
 class TestKnownBackends:
@@ -110,7 +124,7 @@ class TestLspProxyBackendDocumentSync:
 
     def test_file_uri(self):
         backend = LspProxyBackend(command=["test"])
-        uri = backend._file_uri("/home/user/test.py")
+        uri = backend._file_uri(_test_path("test.py"))
         assert uri.startswith("file:///")
         assert "test.py" in uri
 
@@ -125,7 +139,7 @@ class TestLspProxyBackendDocumentSync:
         backend._client = MagicMock()
         backend._started = True
 
-        uri, processed = backend._sync_document("x = 1", "/test/file.py")
+        uri, processed = backend._sync_document("x = 1", _test_path("file.py"))
 
         backend._client.text_document_did_open.assert_called_once()
         assert uri in backend._doc_versions
@@ -138,11 +152,11 @@ class TestLspProxyBackendDocumentSync:
         backend._started = True
 
         # First sync
-        uri, _ = backend._sync_document("x = 1", "/test/file.py")
+        uri, _ = backend._sync_document("x = 1", _test_path("file.py"))
         assert backend._doc_versions[uri] == 0
 
         # Second sync
-        backend._sync_document("x = 2", "/test/file.py")
+        backend._sync_document("x = 2", _test_path("file.py"))
         backend._client.text_document_did_change.assert_called_once()
         assert backend._doc_versions[uri] == 1
 
@@ -152,7 +166,7 @@ class TestLspProxyBackendDocumentSync:
         backend._client = MagicMock()
         backend._started = True
 
-        uri, processed = backend._sync_document("print($HOME)", "/test/file.xsh")
+        uri, processed = backend._sync_document("print($HOME)", _test_path("file.xsh"))
 
         # The didOpen call should have preprocessed source
         call_args = backend._client.text_document_did_open.call_args[0][0]
@@ -173,7 +187,7 @@ class TestLspProxyBackendDiagnostics:
         )
 
         params = lsp.PublishDiagnosticsParams(
-            uri="file:///test/file.py",
+            uri=Path(_test_path("file.py")).as_uri(),
             diagnostics=[
                 lsp.Diagnostic(
                     range=lsp.Range(
@@ -189,7 +203,7 @@ class TestLspProxyBackendDiagnostics:
         backend._handle_diagnostics(params)
         callback.assert_called_once()
         args = callback.call_args[0]
-        assert args[0] == "file:///test/file.py"
+        assert args[0] == Path(_test_path("file.py")).as_uri()
         assert len(args[1]) == 1
 
     def test_handle_diagnostics_without_callback(self):
@@ -197,7 +211,7 @@ class TestLspProxyBackendDiagnostics:
         backend = LspProxyBackend(command=["test"])
 
         params = lsp.PublishDiagnosticsParams(
-            uri="file:///test/file.py",
+            uri=Path(_test_path("file.py")).as_uri(),
             diagnostics=[],
         )
 
@@ -445,7 +459,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "x = $HOME"
-        uri, processed = backend._sync_document(source, "/test/file.xsh")
+        uri, processed = backend._sync_document(source, _test_path("file.xsh"))
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
         assert text.startswith("import typing as __xonsh_typing__")
@@ -460,7 +474,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "x = 1\nprint(x)"
-        uri, processed = backend._sync_document(source, "/test/file.py")
+        uri, processed = backend._sync_document(source, _test_path("file.py"))
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
         assert "__xonsh_typing__" not in text
@@ -475,7 +489,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "x = $HOME"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         assert uri in backend._sync_state
         assert backend._sync_state[uri].preamble_lines == _XONSH_PREAMBLE_LINE_COUNT
@@ -487,7 +501,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "x = 1"
-        uri, _ = backend._sync_document(source, "/test/file.py")
+        uri, _ = backend._sync_document(source, _test_path("file.py"))
 
         assert backend._sync_state[uri].preamble_lines == 0
 
@@ -498,7 +512,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "x = p'/etc/passwd'"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
         assert "__xonsh_Path__" in text
@@ -512,7 +526,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "with p'/tmp/dir'.mkdir().cd():\n    pass"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
         assert "__xonsh_Path__('/tmp/dir')" in text
@@ -526,7 +540,7 @@ class TestLspProxyBackendPreamble:
         backend._started = True
 
         source = "import os\ncd /tmp\nx = 1"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         state = backend._sync_state[uri]
         assert 1 in state.preprocess_result.masked_lines  # cd /tmp
@@ -547,7 +561,7 @@ class TestLspProxyBackendDiagnosticsMapping:
         backend._started = True
 
         source = "x = $HOME\nprint(x)"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         # Simulate backend reporting a diagnostic on line 5 (preamble(4) + line 1)
         params = lsp.PublishDiagnosticsParams(
@@ -582,7 +596,7 @@ class TestLspProxyBackendDiagnosticsMapping:
         backend._started = True
 
         source = "x = $HOME"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         # Diagnostic on preamble line 0
         params = lsp.PublishDiagnosticsParams(
@@ -612,7 +626,7 @@ class TestLspProxyBackendDiagnosticsMapping:
 
         # Line 1 (cd /tmp) will be masked
         source = "import os\ncd /tmp\nx = 1"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
         preamble = backend._sync_state[uri].preamble_lines
 
         # Diagnostic on masked line (cd /tmp)
@@ -644,7 +658,7 @@ class TestLspProxyBackendDiagnosticsMapping:
         backend._started = True
 
         source = "x = $HOME"
-        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         params = lsp.PublishDiagnosticsParams(
             uri=uri,
