@@ -788,3 +788,36 @@ class LspProxyBackend:
                         break
             results.append(value)
         return results
+
+
+# ---------------------------------------------------------------------------
+# Workaround for lsprotocol issue #430: the cattrs converter is missing a
+# structure hook for the Optional variant of the notebook document filter
+# union.  Backends like ty advertise notebookDocumentSync capabilities that
+# trigger this.  Register the missing hook on any cattrs Converter.
+# ---------------------------------------------------------------------------
+_NotebookFilterUnion = Optional[
+    Union[
+        str,
+        lsp.NotebookDocumentFilterNotebookType,
+        lsp.NotebookDocumentFilterScheme,
+        lsp.NotebookDocumentFilterPattern,
+    ]
+]
+
+
+def _patch_converter(converter: Any) -> None:
+    """Register missing lsprotocol cattrs hooks on *converter*."""
+
+    def _notebook_filter_hook(obj: Any, _: Any) -> Any:
+        if obj is None:
+            return None
+        if isinstance(obj, str):
+            return obj
+        if "notebookType" in obj:
+            return converter.structure(obj, lsp.NotebookDocumentFilterNotebookType)
+        if "scheme" in obj:
+            return converter.structure(obj, lsp.NotebookDocumentFilterScheme)
+        return converter.structure(obj, lsp.NotebookDocumentFilterPattern)
+
+    converter.register_structure_hook(_NotebookFilterUnion, _notebook_filter_hook)
