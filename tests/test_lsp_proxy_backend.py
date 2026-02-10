@@ -292,6 +292,90 @@ class TestLspProxyBackendConfiguration:
         assert results[0] == {}
 
 
+class TestLspProxyBackendProgress:
+    """Test progress forwarding from child to editor."""
+
+    @pytest.mark.asyncio
+    async def test_progress_create_forwarded(self):
+        """Test that window/workDoneProgress/create is forwarded to editor."""
+        mock_server = MagicMock()
+        mock_server.work_done_progress = MagicMock()
+        mock_server.work_done_progress.create_async = AsyncMock()
+
+        backend = LspProxyBackend(command=["test"], server=mock_server)
+
+        params = lsp.WorkDoneProgressCreateParams(token="pyright-index-1")
+        await backend._handle_progress_create(params)
+
+        mock_server.work_done_progress.create_async.assert_called_once_with(
+            "pyright-index-1"
+        )
+
+    @pytest.mark.asyncio
+    async def test_progress_create_no_server(self):
+        """Test that progress create without server doesn't raise."""
+        backend = LspProxyBackend(command=["test"])
+        params = lsp.WorkDoneProgressCreateParams(token="test-token")
+        await backend._handle_progress_create(params)  # Should not raise
+
+    def test_progress_begin_forwarded(self):
+        """Test that WorkDoneProgressBegin is forwarded."""
+        mock_server = MagicMock()
+        mock_progress = MagicMock()
+        mock_server.work_done_progress = mock_progress
+
+        backend = LspProxyBackend(command=["test"], server=mock_server)
+
+        value = lsp.WorkDoneProgressBegin(
+            title="Indexing",
+            kind="begin",
+            percentage=0,
+        )
+        params = lsp.ProgressParams(token="pyright-index-1", value=value)
+        backend._handle_progress(params)
+
+        mock_progress.begin.assert_called_once_with("pyright-index-1", value)
+
+    def test_progress_report_forwarded(self):
+        """Test that WorkDoneProgressReport is forwarded."""
+        mock_server = MagicMock()
+        mock_progress = MagicMock()
+        mock_server.work_done_progress = mock_progress
+
+        backend = LspProxyBackend(command=["test"], server=mock_server)
+
+        value = lsp.WorkDoneProgressReport(
+            kind="report",
+            percentage=50,
+            message="50% done",
+        )
+        params = lsp.ProgressParams(token="pyright-index-1", value=value)
+        backend._handle_progress(params)
+
+        mock_progress.report.assert_called_once_with("pyright-index-1", value)
+
+    def test_progress_end_forwarded(self):
+        """Test that WorkDoneProgressEnd is forwarded."""
+        mock_server = MagicMock()
+        mock_progress = MagicMock()
+        mock_server.work_done_progress = mock_progress
+
+        backend = LspProxyBackend(command=["test"], server=mock_server)
+
+        value = lsp.WorkDoneProgressEnd(kind="end", message="Done")
+        params = lsp.ProgressParams(token="pyright-index-1", value=value)
+        backend._handle_progress(params)
+
+        mock_progress.end.assert_called_once_with("pyright-index-1", value)
+
+    def test_progress_no_server(self):
+        """Test that progress without server doesn't raise."""
+        backend = LspProxyBackend(command=["test"])
+        value = lsp.WorkDoneProgressBegin(title="Test", kind="begin")
+        params = lsp.ProgressParams(token="test", value=value)
+        backend._handle_progress(params)  # Should not raise
+
+
 class TestLspProxyBackendNormalizeLocations:
     """Test location normalization."""
 
@@ -349,3 +433,243 @@ class TestLspProxyBackendNormalizeLocations:
         result = backend._normalize_locations([link], None, None)
         assert len(result) == 1
         assert result[0].uri == "file:///target.py"
+
+
+class TestLspProxyBackendPreamble:
+    """Test preamble stub injection."""
+
+    def test_preamble_added_when_xonsh_placeholders_present(self):
+        """Preamble should be prepended when __xonsh_env__ etc. are used."""
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = $HOME"
+        uri, processed = backend._sync_document(source, "/test/file.xsh")
+
+        text = backend._client.text_document_did_open.call_args[0][0].text_document.text
+        assert text.startswith("import typing as __xonsh_typing__")
+        assert "__xonsh_env__: dict[str, __xonsh_typing__.Any]" in text
+        assert "__xonsh_subproc__: __xonsh_typing__.Any" in text
+        assert "__xonsh_at__: __xonsh_typing__.Any" in text
+
+    def test_preamble_not_added_for_pure_python(self):
+        """Preamble should NOT be prepended for pure Python source."""
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = 1\nprint(x)"
+        uri, processed = backend._sync_document(source, "/test/file.py")
+
+        text = backend._client.text_document_did_open.call_args[0][0].text_document.text
+        assert "__xonsh_typing__" not in text
+        assert text.startswith("x = 1")
+
+    def test_preamble_offset_stored(self):
+        """Sync state should record the preamble line count."""
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = $HOME"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        assert uri in backend._sync_state
+        assert backend._sync_state[uri].preamble_lines == _XONSH_PREAMBLE_LINE_COUNT
+
+    def test_preamble_offset_zero_for_pure_python(self):
+        """Pure Python files should have zero preamble offset."""
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = 1"
+        uri, _ = backend._sync_document(source, "/test/file.py")
+
+        assert backend._sync_state[uri].preamble_lines == 0
+
+    def test_preamble_added_for_path_literals(self):
+        """Preamble should be added when path literals are present (no $ or subproc)."""
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = p'/etc/passwd'"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        text = backend._client.text_document_did_open.call_args[0][0].text_document.text
+        assert "__xonsh_Path__" in text
+        assert "class __xonsh_Path__:" in text
+        assert backend._sync_state[uri].preamble_lines > 0
+
+    def test_path_replaced_with_xonsh_path(self):
+        """Path( calls should be replaced with __xonsh_Path__( in sync output."""
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "with p'/tmp/dir'.mkdir().cd():\n    pass"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        text = backend._client.text_document_did_open.call_args[0][0].text_document.text
+        assert "__xonsh_Path__('/tmp/dir')" in text
+        # The from pathlib import Path should NOT be replaced
+        assert "from pathlib import Path" in text
+
+    def test_sync_document_stores_masked_lines(self):
+        """Sync state should record which original lines were masked (via preprocess_result)."""
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "import os\ncd /tmp\nx = 1"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        state = backend._sync_state[uri]
+        assert 1 in state.preprocess_result.masked_lines  # cd /tmp
+        assert 0 not in state.preprocess_result.masked_lines  # import os
+
+
+class TestLspProxyBackendDiagnosticsMapping:
+    """Test diagnostics position mapping and filtering."""
+
+    def test_diagnostics_preamble_offset_subtracted(self):
+        """Diagnostics positions should be adjusted for preamble lines."""
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+        from xonsh_lsp.preprocessing import preprocess_with_mapping
+
+        callback = MagicMock()
+        backend = LspProxyBackend(command=["test"], on_diagnostics=callback)
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = $HOME\nprint(x)"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        # Simulate backend reporting a diagnostic on line 5 (preamble(4) + line 1)
+        params = lsp.PublishDiagnosticsParams(
+            uri=uri,
+            diagnostics=[
+                lsp.Diagnostic(
+                    range=lsp.Range(
+                        start=lsp.Position(
+                            line=_XONSH_PREAMBLE_LINE_COUNT + 1, character=0
+                        ),
+                        end=lsp.Position(
+                            line=_XONSH_PREAMBLE_LINE_COUNT + 1, character=5
+                        ),
+                    ),
+                    message="test error",
+                )
+            ],
+        )
+
+        backend._handle_diagnostics(params)
+        callback.assert_called_once()
+        _, diags = callback.call_args[0]
+        assert len(diags) == 1
+        # Should be mapped back to original line 1
+        assert diags[0].range.start.line == 1
+
+    def test_diagnostics_on_preamble_lines_filtered(self):
+        """Diagnostics on preamble stub lines should be discarded."""
+        callback = MagicMock()
+        backend = LspProxyBackend(command=["test"], on_diagnostics=callback)
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = $HOME"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        # Diagnostic on preamble line 0
+        params = lsp.PublishDiagnosticsParams(
+            uri=uri,
+            diagnostics=[
+                lsp.Diagnostic(
+                    range=lsp.Range(
+                        start=lsp.Position(line=0, character=0),
+                        end=lsp.Position(line=0, character=5),
+                    ),
+                    message="preamble error",
+                )
+            ],
+        )
+
+        backend._handle_diagnostics(params)
+        callback.assert_called_once()
+        _, diags = callback.call_args[0]
+        assert len(diags) == 0
+
+    def test_diagnostics_on_masked_lines_filtered(self):
+        """Diagnostics on masked xonsh lines should be discarded."""
+        callback = MagicMock()
+        backend = LspProxyBackend(command=["test"], on_diagnostics=callback)
+        backend._client = MagicMock()
+        backend._started = True
+
+        # Line 1 (cd /tmp) will be masked
+        source = "import os\ncd /tmp\nx = 1"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+        preamble = backend._sync_state[uri].preamble_lines
+
+        # Diagnostic on masked line (cd /tmp)
+        params = lsp.PublishDiagnosticsParams(
+            uri=uri,
+            diagnostics=[
+                lsp.Diagnostic(
+                    range=lsp.Range(
+                        start=lsp.Position(line=preamble + 1, character=0),
+                        end=lsp.Position(line=preamble + 1, character=4),
+                    ),
+                    message="invalid syntax on masked line",
+                )
+            ],
+        )
+
+        backend._handle_diagnostics(params)
+        callback.assert_called_once()
+        _, diags = callback.call_args[0]
+        assert len(diags) == 0
+
+    def test_diagnostics_preserves_severity_and_code(self):
+        """Mapped diagnostics should preserve all fields."""
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+
+        callback = MagicMock()
+        backend = LspProxyBackend(command=["test"], on_diagnostics=callback)
+        backend._client = MagicMock()
+        backend._started = True
+
+        source = "x = $HOME"
+        uri, _ = backend._sync_document(source, "/test/file.xsh")
+
+        params = lsp.PublishDiagnosticsParams(
+            uri=uri,
+            diagnostics=[
+                lsp.Diagnostic(
+                    range=lsp.Range(
+                        start=lsp.Position(
+                            line=_XONSH_PREAMBLE_LINE_COUNT, character=0
+                        ),
+                        end=lsp.Position(
+                            line=_XONSH_PREAMBLE_LINE_COUNT, character=1
+                        ),
+                    ),
+                    message="test warning",
+                    severity=lsp.DiagnosticSeverity.Warning,
+                    code="testCode",
+                    source="pyright",
+                )
+            ],
+        )
+
+        backend._handle_diagnostics(params)
+        _, diags = callback.call_args[0]
+        assert len(diags) == 1
+        assert diags[0].message == "test warning"
+        assert diags[0].severity == lsp.DiagnosticSeverity.Warning
+        assert diags[0].code == "testCode"
+        assert diags[0].source == "pyright"
