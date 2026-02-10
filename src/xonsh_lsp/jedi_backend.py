@@ -15,7 +15,6 @@ from lsprotocol import types as lsp
 
 from xonsh_lsp.preprocessing import (
     PreprocessResult,
-    has_xonsh_syntax,
     map_position_from_processed,
     map_position_to_processed,
     preprocess_source,
@@ -283,12 +282,11 @@ class JediBackend:
 
         try:
             # Preprocess xonsh syntax to valid Python
-            processed_source = preprocess_source(source)
-            script = Script(processed_source, path=path)
+            preprocess_result = preprocess_with_mapping(source)
+            script = Script(preprocess_result.source, path=path)
             errors = script.get_syntax_errors()
 
-            # Get original source lines to check for xonsh syntax
-            original_lines = source.splitlines()
+            xonsh_lines = preprocess_result.xonsh_lines
 
             diagnostics = []
             for error in errors:
@@ -297,12 +295,9 @@ class JediBackend:
                 # Skip errors on lines that had xonsh syntax in the original
                 # Also check nearby lines since preprocessing can cause errors
                 # on subsequent lines (e.g., unbalanced parens)
-                if error_line < len(original_lines):
-                    # Check current line and up to 10 lines before for xonsh syntax
-                    start_check = max(0, error_line - 10)
-                    context_lines = original_lines[start_check:error_line + 1]
-                    if any(has_xonsh_syntax(line) for line in context_lines):
-                        continue
+                start_check = max(0, error_line - 10)
+                if any(ln in xonsh_lines for ln in range(start_check, error_line + 1)):
+                    continue
 
                 diagnostics.append(
                     lsp.Diagnostic(

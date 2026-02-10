@@ -12,11 +12,7 @@ from xonsh_lsp.jedi_backend import JEDI_AVAILABLE, JediBackend
 
 # Re-export preprocessing utilities
 from xonsh_lsp.preprocessing import (
-    BALANCED_PATTERNS,
-    PRE_BALANCED_PATTERNS,
-    SIMPLE_PATTERNS,
     PreprocessResult,
-    has_xonsh_syntax,
     map_position_from_processed,
     map_position_to_processed,
     preprocess_source,
@@ -31,12 +27,8 @@ __all__ = [
     "JediBackend",
     "JEDI_AVAILABLE",
     "PreprocessResult",
-    "PRE_BALANCED_PATTERNS",
-    "SIMPLE_PATTERNS",
-    "BALANCED_PATTERNS",
     "preprocess_source",
     "preprocess_with_mapping",
     "map_position_to_processed",
     "map_position_from_processed",
-    "has_xonsh_syntax",
 ]
