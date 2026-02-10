@@ -84,7 +84,9 @@ class XonshHoverProvider:
 
         # Check if in subprocess context for command hover
         elif self._is_command_context(source, line, col):
-            hover_content = self._get_command_hover(word)
+            hover_content = self._find_source_alias_hover(source, word)
+            if hover_content is None:
+                hover_content = self._get_command_hover(word)
 
         # Fall back to Python hover
         if hover_content is None:
@@ -291,6 +293,121 @@ This environment variable is not currently set.
             pass
 
         return hover
+
+    def _find_source_alias_hover(self, source: str, name: str) -> str | None:
+        """Find a source-defined alias and return hover markdown.
+
+        Detects three patterns:
+        - Pattern A: aliases['name'] = value
+        - Pattern B: @aliases.register + def _name()
+        - Pattern C: @aliases.register("name") + def _name()
+        """
+        parse_result = self.server.parser.parse(source)
+        tree = parse_result.tree
+        if tree is None:
+            return None
+
+        def _get_text(node) -> str:
+            return source[node.start_byte : node.end_byte]
+
+        def _is_aliases_attr(node) -> bool:
+            if node.type != "attribute":
+                return False
+            obj = node.child_by_field_name("object")
+            attr = node.child_by_field_name("attribute")
+            return (
+                obj is not None
+                and attr is not None
+                and _get_text(obj) == "aliases"
+                and _get_text(attr) == "register"
+            )
+
+        def _extract_string_content(node) -> str | None:
+            if node.type == "string":
+                for child in node.children:
+                    if child.type == "string_content":
+                        return _get_text(child)
+            return None
+
+        result: str | None = None
+
+        def visit(node) -> None:
+            nonlocal result
+            if result is not None:
+                return
+
+            # Pattern A: aliases['name'] = value
+            if node.type == "assignment":
+                left = node.child_by_field_name("left")
+                if left is not None and left.type == "subscript":
+                    value_node = left.child_by_field_name("value")
+                    subscript = left.child_by_field_name("subscript")
+                    if (
+                        value_node is not None
+                        and _get_text(value_node) == "aliases"
+                        and subscript is not None
+                    ):
+                        alias_name = _extract_string_content(subscript)
+                        if alias_name == name:
+                            rhs = node.child_by_field_name("right")
+                            rhs_text = _get_text(rhs) if rhs is not None else "..."
+                            line_num = node.start_point[0] + 1
+                            result = (
+                                f"## Alias: `{name}`\n\n"
+                                f"**Defined at:** line {line_num}\n\n"
+                                f"**Value:**\n```\n{rhs_text}\n```\n"
+                            )
+                            return
+
+            # Patterns B & C: @aliases.register / @aliases.register("name")
+            elif node.type == "decorated_definition":
+                for child in node.children:
+                    if child.type == "decorator":
+                        for deco_child in child.children:
+                            if deco_child.type == "comment" or _get_text(deco_child) == "@":
+                                continue
+                            matched = False
+                            # Pattern B: @aliases.register (bare)
+                            if _is_aliases_attr(deco_child):
+                                func_def = node.child_by_field_name("definition")
+                                if func_def is None:
+                                    for c in node.children:
+                                        if c.type == "function_definition":
+                                            func_def = c
+                                            break
+                                if func_def is not None:
+                                    name_node = func_def.child_by_field_name("name")
+                                    if name_node is not None:
+                                        fname = _get_text(name_node).lstrip("_")
+                                        if fname == name:
+                                            matched = True
+                            # Pattern C: @aliases.register("name") (call)
+                            elif deco_child.type == "call":
+                                func = deco_child.child_by_field_name("function")
+                                if func is not None and _is_aliases_attr(func):
+                                    args = deco_child.child_by_field_name("arguments")
+                                    if args is not None:
+                                        for arg in args.children:
+                                            arg_name = _extract_string_content(arg)
+                                            if arg_name == name:
+                                                matched = True
+                                                break
+
+                            if matched:
+                                line_num = node.start_point[0] + 1
+                                func_text = _get_text(node)
+                                result = (
+                                    f"## Alias: `{name}`\n\n"
+                                    f"**Defined at:** line {line_num}\n\n"
+                                    f"**Implementation:**\n```python\n{func_text}\n```\n"
+                                )
+                                return
+
+            for child in node.children:
+                visit(child)
+
+        visit(tree.root_node)
+        return result
 
     def _is_command_context(self, source: str, line: int, col: int) -> bool:
         """Check if the position is in a subprocess command context."""
