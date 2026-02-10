@@ -63,9 +63,17 @@ class XonshDiagnosticsProvider:
             self._get_env_var_diagnostics(doc.source, parse_result)
         )
 
+        # Extract source-defined aliases
+        source_aliases = self._extract_aliases_from_source(doc.source, parse_result)
+
         # Subprocess diagnostics
         diagnostics.extend(
-            self._get_subprocess_diagnostics(doc.source, parse_result)
+            self._get_subprocess_diagnostics(doc.source, parse_result, source_aliases)
+        )
+
+        # Split-expression diagnostics (e.g. `myapp world` parsed as two expressions)
+        diagnostics.extend(
+            self._get_split_expression_diagnostics(doc.source, parse_result, source_aliases)
         )
 
         # Cache xonsh diagnostics
@@ -181,7 +189,7 @@ class XonshDiagnosticsProvider:
         return diagnostics
 
     def _get_subprocess_diagnostics(
-        self, source: str, parse_result
+        self, source: str, parse_result, source_aliases: set[str] | None = None
     ) -> list[lsp.Diagnostic]:
         """Get diagnostics for subprocess constructs."""
         diagnostics = []
@@ -228,7 +236,7 @@ class XonshDiagnosticsProvider:
                     continue
 
                 # Check if command exists
-                if not self._command_exists(cmd):
+                if not self._command_exists(cmd, source_aliases):
                     diagnostics.append(
                         lsp.Diagnostic(
                             range=lsp.Range(
@@ -281,13 +289,194 @@ class XonshDiagnosticsProvider:
         "pwd", "times", "logout", "help",
     }
 
-    def _command_exists(self, cmd: str) -> bool:
-        """Check if a command exists in PATH or is a shell builtin."""
-        # Check shell builtins first
+    def _command_exists(self, cmd: str, source_aliases: set[str] | None = None) -> bool:
+        """Check if a command exists in PATH, is a shell builtin, or a source alias."""
         if cmd in self.SHELL_BUILTINS:
             return True
-        # Check PATH
+        if source_aliases and cmd in source_aliases:
+            return True
         return shutil.which(cmd) is not None
+
+    def _extract_aliases_from_source(self, source: str, parse_result) -> set[str]:
+        """Extract alias names defined in source by walking the tree-sitter AST.
+
+        Detects three patterns:
+        - Pattern A: aliases['name'] = ...
+        - Pattern B: @aliases.register + def _name()
+        - Pattern C: @aliases.register("name") + def __name()
+        """
+        aliases: set[str] = set()
+        tree = parse_result.tree
+        if tree is None:
+            return aliases
+
+        def _get_text(node) -> str:
+            return source[node.start_byte:node.end_byte]
+
+        def _is_aliases_attr(node) -> bool:
+            """Check if node is `aliases.register` attribute access."""
+            if node.type != "attribute":
+                return False
+            obj = node.child_by_field_name("object")
+            attr = node.child_by_field_name("attribute")
+            return (
+                obj is not None
+                and attr is not None
+                and _get_text(obj) == "aliases"
+                and _get_text(attr) == "register"
+            )
+
+        def _extract_string_content(node) -> str | None:
+            """Extract plain string content from a string node."""
+            if node.type == "string":
+                for child in node.children:
+                    if child.type == "string_content":
+                        return _get_text(child)
+            return None
+
+        def visit(node) -> None:
+            # Pattern A: aliases['name'] = ...
+            if node.type == "assignment":
+                left = node.child_by_field_name("left")
+                if left is not None and left.type == "subscript":
+                    value = left.child_by_field_name("value")
+                    subscript = left.child_by_field_name("subscript")
+                    if (
+                        value is not None
+                        and _get_text(value) == "aliases"
+                        and subscript is not None
+                    ):
+                        name = _extract_string_content(subscript)
+                        if name:
+                            aliases.add(name)
+
+            # Patterns B & C: @aliases.register / @aliases.register("name")
+            elif node.type == "decorated_definition":
+                for child in node.children:
+                    if child.type == "decorator":
+                        # The decorator's expression is its child (skip the '@')
+                        for deco_child in child.children:
+                            if deco_child.type == "comment" or _get_text(deco_child) == "@":
+                                continue
+                            # Pattern B: @aliases.register (bare attribute)
+                            if _is_aliases_attr(deco_child):
+                                # Get function name, strip leading _
+                                func_def = node.child_by_field_name("definition")
+                                if func_def is None:
+                                    for c in node.children:
+                                        if c.type == "function_definition":
+                                            func_def = c
+                                            break
+                                if func_def is not None:
+                                    name_node = func_def.child_by_field_name("name")
+                                    if name_node is not None:
+                                        fname = _get_text(name_node)
+                                        aliases.add(fname.lstrip("_"))
+                            # Pattern C: @aliases.register("name") (call)
+                            elif deco_child.type == "call":
+                                func = deco_child.child_by_field_name("function")
+                                if func is not None and _is_aliases_attr(func):
+                                    args = deco_child.child_by_field_name("arguments")
+                                    if args is not None:
+                                        for arg in args.children:
+                                            name = _extract_string_content(arg)
+                                            if name:
+                                                aliases.add(name)
+                                                break
+
+            for child in node.children:
+                visit(child)
+
+        visit(tree.root_node)
+        return aliases
+
+    def _get_split_expression_diagnostics(
+        self, source: str, parse_result, source_aliases: set[str]
+    ) -> list[lsp.Diagnostic]:
+        """Detect bare identifier followed by more tokens on the same line.
+
+        Tree-sitter may parse ``cmd args`` as either:
+        - ``ERROR(identifier) + expression_statement`` (short identifiers), or
+        - ``expression_statement(identifier) + expression_statement`` (longer ones).
+
+        When the first identifier is not a known command or source-defined alias
+        we emit a warning.
+        """
+        diagnostics: list[lsp.Diagnostic] = []
+        tree = parse_result.tree
+        if tree is None:
+            return diagnostics
+
+        def _leading_identifier_name(node) -> str | None:
+            """Return identifier text if *node* is a single bare identifier."""
+            if node.type == "expression_statement":
+                children = [c for c in node.children if c.type not in ("comment", "newline")]
+                if len(children) == 1 and children[0].type == "identifier":
+                    return source[children[0].start_byte:children[0].end_byte]
+            return None
+
+        def check_siblings(children_list) -> None:
+            """Check a list of sibling nodes for split-expression patterns."""
+            i = 0
+            while i < len(children_list):
+                node = children_list[i]
+
+                # Recurse into compound statements to check their blocks
+                if node.type in (
+                    "function_definition", "class_definition",
+                    "if_statement", "for_statement", "while_statement",
+                    "try_statement", "with_statement",
+                ):
+                    for child in node.children:
+                        if child.type == "block":
+                            check_siblings(list(child.children))
+
+                name = _leading_identifier_name(node)
+                if name is None:
+                    i += 1
+                    continue
+
+                # Look ahead for more nodes on the same line
+                line = node.start_point[0]
+                j = i + 1
+                while j < len(children_list):
+                    sibling = children_list[j]
+                    if sibling.start_point[0] != line:
+                        break
+                    if sibling.type not in ("expression_statement", "ERROR"):
+                        break
+                    j += 1
+
+                if j > i + 1:
+                    if not self._command_exists(name, source_aliases):
+                        last = children_list[j - 1]
+                        diagnostics.append(
+                            lsp.Diagnostic(
+                                range=lsp.Range(
+                                    start=lsp.Position(
+                                        line=node.start_point[0],
+                                        character=node.start_point[1],
+                                    ),
+                                    end=lsp.Position(
+                                        line=last.end_point[0],
+                                        character=last.end_point[1],
+                                    ),
+                                ),
+                                message=(
+                                    f"'{name}' is not a known command or alias. "
+                                    f"Use $[{name} ...] for subprocess invocation."
+                                ),
+                                severity=lsp.DiagnosticSeverity.Warning,
+                                source="xonsh-lsp",
+                                code=DiagnosticCode.UNKNOWN_COMMAND_OR_ALIAS,
+                            )
+                        )
+                    i = j
+                else:
+                    i += 1
+
+        check_siblings(list(tree.root_node.children))
+        return diagnostics
 
 
 class DiagnosticCode:
@@ -299,3 +488,4 @@ class DiagnosticCode:
     EMPTY_SUBPROCESS = "empty-subprocess"
     INVALID_GLOB = "invalid-glob"
     PYTHON_ERROR = "python-error"
+    UNKNOWN_COMMAND_OR_ALIAS = "unknown-command-or-alias"
