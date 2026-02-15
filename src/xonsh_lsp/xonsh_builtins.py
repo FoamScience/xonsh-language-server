@@ -502,6 +502,16 @@ XONSH_MAGIC_VARS = {
     },
 }
 
+# EnvPath methods (for $PATH, $PATHEXT, etc.)
+ENV_PATH_METHODS: dict[str, dict[str, str]] = {
+    "append": {"signature": "append(value: str) -> None", "doc": "Append a directory to the path list."},
+    "prepend": {"signature": "prepend(value: str) -> None", "doc": "Prepend a directory to the path list."},
+    "insert": {"signature": "insert(index: int, value: str) -> None", "doc": "Insert a directory at the given position."},
+    "remove": {"signature": "remove(value: str) -> None", "doc": "Remove a directory from the path list."},
+    "add": {"signature": "add(value: str, front: bool = False, replace: bool = False) -> None", "doc": "Add a directory to the path list."},
+    "paths": {"signature": "paths: list[str]", "doc": "The underlying list of path strings."},
+}
+
 # Xonsh string prefixes
 XONSH_STRING_PREFIXES = {
     "p": {

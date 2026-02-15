@@ -205,3 +205,41 @@ class PythonBackend(Protocol):
             The resolved workspace symbol.
         """
         ...
+
+    async def get_semantic_tokens(
+        self, source: str, path: str | None = None
+    ) -> lsp.SemanticTokens | None:
+        """Get semantic tokens for the full document.
+
+        Args:
+            source: The original xonsh source code.
+            path: Optional file path for context.
+
+        Returns:
+            Semantic tokens, or None.
+        """
+        ...
+
+    async def get_semantic_tokens_range(
+        self,
+        source: str,
+        start_line: int,
+        start_char: int,
+        end_line: int,
+        end_char: int,
+        path: str | None = None,
+    ) -> lsp.SemanticTokens | None:
+        """Get semantic tokens for a range of the document.
+
+        Args:
+            source: The original xonsh source code.
+            start_line: 0-based start line.
+            start_char: 0-based start character.
+            end_line: 0-based end line.
+            end_char: 0-based end character.
+            path: Optional file path for context.
+
+        Returns:
+            Semantic tokens, or None.
+        """
+        ...

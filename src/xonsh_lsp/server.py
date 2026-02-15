@@ -535,6 +535,54 @@ async def workspace_symbol_resolve(symbol: lsp.WorkspaceSymbol) -> lsp.Workspace
 
 
 # ============================================================================
+# Semantic Tokens
+# ============================================================================
+
+SEMANTIC_TOKEN_TYPES = [t.value for t in lsp.SemanticTokenTypes]
+SEMANTIC_TOKEN_MODIFIERS = [m.value for m in lsp.SemanticTokenModifiers]
+SEMANTIC_TOKENS_LEGEND = lsp.SemanticTokensLegend(
+    token_types=SEMANTIC_TOKEN_TYPES,
+    token_modifiers=SEMANTIC_TOKEN_MODIFIERS,
+)
+
+
+@server.feature(
+    lsp.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
+    SEMANTIC_TOKENS_LEGEND,
+)
+async def semantic_tokens_full(
+    params: lsp.SemanticTokensParams,
+) -> lsp.SemanticTokens | None:
+    """Provide semantic tokens for the full document."""
+    uri = params.text_document.uri
+    doc = server.get_document(uri)
+    if doc is None:
+        return None
+
+    return await server.python_delegate.get_semantic_tokens(doc.source, doc.path)
+
+
+@server.feature(lsp.TEXT_DOCUMENT_SEMANTIC_TOKENS_RANGE)
+async def semantic_tokens_range(
+    params: lsp.SemanticTokensRangeParams,
+) -> lsp.SemanticTokens | None:
+    """Provide semantic tokens for a range."""
+    uri = params.text_document.uri
+    doc = server.get_document(uri)
+    if doc is None:
+        return None
+
+    return await server.python_delegate.get_semantic_tokens_range(
+        doc.source,
+        params.range.start.line,
+        params.range.start.character,
+        params.range.end.line,
+        params.range.end.character,
+        doc.path,
+    )
+
+
+# ============================================================================
 # Code Actions
 # ============================================================================
 

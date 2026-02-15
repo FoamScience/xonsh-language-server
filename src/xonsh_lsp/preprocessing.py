@@ -197,6 +197,12 @@ class PreprocessResult:
     xonsh_lines: set[int] = field(default_factory=set)
     """Set of original line numbers that contained any xonsh syntax."""
 
+    replacement_regions: list[tuple[int, int, int, int, str]] = field(default_factory=list)
+    """(start_line, start_col, end_line, end_col, node_type) for each replaced xonsh construct.
+
+    Coordinates are in original source. Used by semantic tokens to emit
+    synthetic tokens for xonsh constructs."""
+
 
 # ---------------------------------------------------------------------------
 # Line mapping utilities (unchanged)
@@ -305,6 +311,7 @@ def preprocess_with_mapping(source: str) -> PreprocessResult:
     source_bytes = source.encode("utf-8")
 
     replacements: list[tuple[int, int, str]] = []  # (start_byte, end_byte, replacement)
+    replacement_regions: list[tuple[int, int, int, int, str]] = []  # (start_line, start_col, end_line, end_col, node_type)
     masked_lines: set[int] = set()
     xonsh_lines: set[int] = set()
 
@@ -313,6 +320,14 @@ def preprocess_with_mapping(source: str) -> PreprocessResult:
             if node.type in _REPLACEABLE_TYPES:
                 repl = _compute_replacement(node, source_bytes)
                 replacements.append((node.start_byte, node.end_byte, repl))
+                # Store region for synthetic semantic tokens
+                replacement_regions.append((
+                    node.start_point[0],   # start_line
+                    node.start_point[1],   # start_col
+                    node.end_point[0],     # end_line
+                    node.end_point[1],     # end_col
+                    node.type,
+                ))
                 for ln in range(node.start_point[0], node.end_point[0] + 1):
                     xonsh_lines.add(ln)
                 return  # don't descend into replaced nodes
@@ -400,6 +415,7 @@ def preprocess_with_mapping(source: str) -> PreprocessResult:
         added_line_position=path_import_line if path_import_added else 0,
         masked_lines=masked_lines,
         xonsh_lines=xonsh_lines,
+        replacement_regions=replacement_regions,
     )
 
 

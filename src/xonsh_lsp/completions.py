@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 from lsprotocol import types as lsp
 
-from xonsh_lsp.xonsh_builtins import XONSH_BUILTINS, XONSH_ALIASES, XONSH_MAGIC_VARS, XONSH_XONTRIBS, XONSH_AT_OBJECTS
+from xonsh_lsp.xonsh_builtins import XONSH_BUILTINS, XONSH_ALIASES, XONSH_MAGIC_VARS, XONSH_XONTRIBS, XONSH_AT_OBJECTS, ENV_PATH_METHODS
 
 if TYPE_CHECKING:
     from xonsh_lsp.server import XonshLanguageServer
@@ -70,6 +70,12 @@ class XonshCompletionProvider:
             env_items = self._get_env_completions(text_before)
             logger.debug(f"Added {len(env_items)} env completions")
             items.extend(env_items)
+
+        # Environment variable method completions ($PATH.append, etc.)
+        if "." in text_before and "$" in text_before:
+            env_method_items = self._get_env_var_method_completions(text_before)
+            logger.debug(f"Added {len(env_method_items)} env method completions")
+            items.extend(env_method_items)
 
         # Path completions
         if trigger_char == "/" or self._is_path_context(text_before):
@@ -203,6 +209,38 @@ class XonshCompletionProvider:
                         sort_text=f"1_{name}",
                     )
                 )
+
+        return items
+
+    def _get_env_var_method_completions(self, text_before: str) -> list[lsp.CompletionItem]:
+        """Get method completions for $VAR. patterns (e.g., $PATH.append)."""
+        import re
+
+        match = re.search(r'\$(\w+)\.\w*$', text_before)
+        if not match:
+            return []
+
+        var_name = match.group(1)
+        var_info = XONSH_MAGIC_VARS.get(var_name)
+        if not var_info:
+            return []
+
+        var_type = var_info.get("type", "")
+        if var_type != "EnvPath":
+            return []
+
+        items = []
+        for name, info in ENV_PATH_METHODS.items():
+            items.append(
+                lsp.CompletionItem(
+                    label=name,
+                    kind=lsp.CompletionItemKind.Method,
+                    detail=info.get("signature", ""),
+                    documentation=info.get("doc", ""),
+                    insert_text=name,
+                    sort_text=f"0_{name}",
+                )
+            )
 
         return items
 

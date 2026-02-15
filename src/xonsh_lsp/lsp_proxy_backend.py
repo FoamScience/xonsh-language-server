@@ -42,12 +42,13 @@ KNOWN_BACKENDS: dict[str, list[str]] = {
 # Path extensions (.cd(), .mkdir() returning self, etc.).
 _XONSH_PREAMBLE_LINES = [
     "import typing as __xonsh_typing__",
+    "import pathlib as __xonsh_pathlib__",
     "__xonsh_env__: dict[str, __xonsh_typing__.Any] = {}",
     "__xonsh_subproc__: __xonsh_typing__.Any = None",
     "__xonsh_at__: __xonsh_typing__.Any = None",
-    "class __xonsh_Path__:",
-    "    def __init__(self, *a: __xonsh_typing__.Any) -> None: ...",
-    "    def __getattr__(self, name: str) -> __xonsh_typing__.Any: ...",
+    "class __xonsh_Path__(__xonsh_pathlib__.Path):",
+    "    def cd(self) -> '__xonsh_Path__': ...",
+    "    def mkdir(self, *a: __xonsh_typing__.Any, **kw: __xonsh_typing__.Any) -> '__xonsh_Path__': ...",
     "    def __truediv__(self, o: __xonsh_typing__.Any) -> '__xonsh_Path__': ...",
     "    def __enter__(self) -> '__xonsh_Path__': ...",
     "    def __exit__(self, *a: __xonsh_typing__.Any) -> None: ...",
@@ -56,12 +57,57 @@ _XONSH_PREAMBLE = "\n".join(_XONSH_PREAMBLE_LINES) + "\n"
 _XONSH_PREAMBLE_LINE_COUNT = len(_XONSH_PREAMBLE_LINES)
 
 
+# Mapping from xonsh node types to semantic token type names.
+# Used to emit synthetic tokens for xonsh constructs that replace child tokens.
+_XONSH_SEMANTIC_TOKEN_TYPES: dict[str, str] = {
+    "env_variable": "variable",
+    "env_variable_braced": "variable",
+    "captured_subprocess": "macro",
+    "captured_subprocess_object": "macro",
+    "uncaptured_subprocess": "macro",
+    "uncaptured_subprocess_object": "macro",
+    "tokenized_substitution": "macro",
+    "python_evaluation": "variable",
+    "at_object": "variable",
+    "path_string": "string",
+    "macro_call": "function",
+    "regex_glob": "string",
+    "glob_pattern": "string",
+    "formatted_glob": "string",
+    "custom_function_glob": "string",
+    "glob_path": "string",
+    "regex_path_glob": "string",
+}
+
+
 @dataclass
 class _SyncState:
     """Per-document synchronization state stored after each sync."""
 
     preprocess_result: PreprocessResult
     preamble_lines: int = 0
+
+
+def _token_in_replacement(
+    mapping: list[tuple[int, int]], proc_start: int, proc_end: int
+) -> bool:
+    """Check if a token falls entirely within a non-1:1 mapping segment.
+
+    Returns True when both proc_start and proc_end lie in the same segment
+    whose processed range differs from its original range (i.e. a replacement).
+    Tokens in such segments have no meaningful original position.
+    """
+    for i in range(len(mapping) - 1):
+        seg_orig_start = mapping[i][0]
+        seg_proc_start = mapping[i][1]
+        seg_orig_end = mapping[i + 1][0]
+        seg_proc_end = mapping[i + 1][1]
+
+        if seg_proc_start <= proc_start and proc_end <= seg_proc_end:
+            # Token is within this segment
+            return (seg_proc_end - seg_proc_start) != (seg_orig_end - seg_orig_start)
+
+    return False
 
 
 class LspProxyBackend:
@@ -99,6 +145,8 @@ class LspProxyBackend:
         self._workspace_root: str | None = None
         self._started = False
         self._sync_state: dict[str, _SyncState] = {}  # uri -> per-doc state
+        self._semantic_type_remap: list[int] = []
+        self._semantic_modifier_remap: list[int] = []
 
     async def start(self, workspace_root: str | None = None) -> None:
         """Start the child LSP server.
@@ -140,6 +188,11 @@ class LspProxyBackend:
         @self._client.feature(lsp.WORKSPACE_INLAY_HINT_REFRESH)
         async def on_inlay_hint_refresh(params: None) -> None:
             await self._handle_inlay_hint_refresh()
+
+        # Forward workspace/semanticTokens/refresh from child to editor
+        @self._client.feature(lsp.WORKSPACE_SEMANTIC_TOKENS_REFRESH)
+        async def on_semantic_tokens_refresh(params: None) -> None:
+            await self._handle_semantic_tokens_refresh()
 
         # Forward window/logMessage from child (avoids "unknown method" warnings)
         @self._client.feature(lsp.WINDOW_LOG_MESSAGE)
@@ -186,11 +239,23 @@ class LspProxyBackend:
                                     properties=["tooltip", "textEdits", "label.tooltip", "label.location"],
                                 ),
                             ),
+                            semantic_tokens=lsp.SemanticTokensClientCapabilities(
+                                requests=lsp.ClientSemanticTokensRequestOptions(
+                                    full=True,
+                                    range=True,
+                                ),
+                                token_types=[t.value for t in lsp.SemanticTokenTypes],
+                                token_modifiers=[m.value for m in lsp.SemanticTokenModifiers],
+                                formats=[lsp.TokenFormat.Relative],
+                            ),
                         ),
                         workspace=lsp.WorkspaceClientCapabilities(
                             configuration=True,
                             workspace_folders=True,
                             inlay_hint=lsp.InlayHintWorkspaceClientCapabilities(
+                                refresh_support=True,
+                            ),
+                            semantic_tokens=lsp.SemanticTokensWorkspaceClientCapabilities(
                                 refresh_support=True,
                             ),
                             symbol=lsp.WorkspaceSymbolClientCapabilities(
@@ -210,6 +275,9 @@ class LspProxyBackend:
             )
             server_info = getattr(result, 'server_info', None)
             logger.info(f"PROXY: backend initialized: {server_info}")
+
+            # Build semantic token legend remap arrays
+            self._build_semantic_legend_remap(result)
         except Exception as e:
             logger.error(f"PROXY: initialization failed: {e}")
             await self._try_stop_client()
@@ -287,11 +355,17 @@ class LspProxyBackend:
         preprocess_result = preprocess_with_mapping(source)
         masked_source = preprocess_result.source
 
-        # Replace Path( with __xonsh_Path__( so xonsh Path extensions
-        # (.cd(), .mkdir() returning self, etc.) don't cause false errors.
+        # Alias Path to __xonsh_Path__ so xonsh Path extensions
+        # (.cd(), .mkdir() returning self, etc.) are available without
+        # shifting column positions (which would break position mapping).
         has_xonsh_path = "Path(" in masked_source
         if has_xonsh_path:
-            masked_source = masked_source.replace("Path(", "__xonsh_Path__(")
+            lines = masked_source.split("\n")
+            for i, line in enumerate(lines):
+                if line.strip() == "from pathlib import Path":
+                    lines[i] = "Path = __xonsh_Path__"
+                    break
+            masked_source = "\n".join(lines)
 
         # Prepend stub declarations when xonsh placeholders or Path are present
         preamble_lines = 0
@@ -735,6 +809,257 @@ class LspProxyBackend:
             logger.debug(f"Proxy workspace symbol resolve error: {e}")
             return symbol
 
+    async def get_semantic_tokens(
+        self, source: str, path: str | None = None
+    ) -> lsp.SemanticTokens | None:
+        """Get semantic tokens for the full document from the child LSP server."""
+        if not self._started or self._client is None:
+            return None
+
+        try:
+            uri = self._file_uri(path)
+            self._sync_document(source, path)
+
+            result = await self._client.text_document_semantic_tokens_full_async(
+                lsp.SemanticTokensParams(
+                    text_document=lsp.TextDocumentIdentifier(uri=uri),
+                )
+            )
+
+            if result is None:
+                return None
+
+            state = self._sync_state.get(uri)
+            if state is None:
+                return result
+
+            return self._remap_semantic_tokens(result.data, state)
+
+        except Exception as e:
+            logger.debug(f"Proxy semantic tokens error: {e}")
+            return None
+
+    async def get_semantic_tokens_range(
+        self,
+        source: str,
+        start_line: int,
+        start_char: int,
+        end_line: int,
+        end_char: int,
+        path: str | None = None,
+    ) -> lsp.SemanticTokens | None:
+        """Get semantic tokens for a range from the child LSP server."""
+        if not self._started or self._client is None:
+            return None
+
+        try:
+            preprocess_result = preprocess_with_mapping(source)
+            uri = self._file_uri(path)
+            self._sync_document(source, path)
+
+            preamble = self._preamble_offset(uri)
+
+            # Map range to preprocessed coordinates + preamble offset
+            mapped_start_line, mapped_start_char = map_position_to_processed(
+                preprocess_result, start_line, start_char
+            )
+            mapped_end_line, mapped_end_char = map_position_to_processed(
+                preprocess_result, end_line, end_char
+            )
+            mapped_start_line += preamble
+            mapped_end_line += preamble
+
+            result = await self._client.text_document_semantic_tokens_range_async(
+                lsp.SemanticTokensRangeParams(
+                    text_document=lsp.TextDocumentIdentifier(uri=uri),
+                    range=lsp.Range(
+                        start=lsp.Position(line=mapped_start_line, character=mapped_start_char),
+                        end=lsp.Position(line=mapped_end_line, character=mapped_end_char),
+                    ),
+                )
+            )
+
+            if result is None:
+                return None
+
+            state = self._sync_state.get(uri)
+            if state is None:
+                return result
+
+            return self._remap_semantic_tokens(result.data, state)
+
+        except Exception as e:
+            logger.debug(f"Proxy semantic tokens range error: {e}")
+            return None
+
+    def _remap_semantic_tokens(
+        self, data: list[int], state: _SyncState
+    ) -> lsp.SemanticTokens | None:
+        """Remap semantic token data from child coordinates to original.
+
+        Decodes delta-encoded token positions to absolute, subtracts preamble,
+        maps columns back via preprocessing, filters preamble/masked tokens,
+        remaps type/modifier indices, and re-encodes to delta format.
+        """
+        if not data:
+            return lsp.SemanticTokens(data=[])
+
+        preamble = state.preamble_lines
+        pp = state.preprocess_result
+        masked = pp.masked_lines
+
+        # Decode delta-encoded groups of 5 into absolute positions
+        # Format: [deltaLine, deltaStartChar, length, tokenType, tokenModifiers, ...]
+        absolute_tokens: list[tuple[int, int, int, int, int]] = []
+        current_line = 0
+        current_char = 0
+        for i in range(0, len(data), 5):
+            delta_line = data[i]
+            delta_char = data[i + 1]
+            length = data[i + 2]
+            token_type = data[i + 3]
+            token_modifiers = data[i + 4]
+
+            if delta_line > 0:
+                current_line += delta_line
+                current_char = delta_char
+            else:
+                current_char += delta_char
+
+            absolute_tokens.append(
+                (current_line, current_char, length, token_type, token_modifiers)
+            )
+
+        # Pass 1: remap non-replacement tokens from child
+        remapped: list[tuple[int, int, int, int, int]] = []
+        for abs_line, abs_char, length, token_type, token_modifiers in absolute_tokens:
+            # Subtract preamble
+            pre_line = abs_line - preamble
+            if pre_line < 0:
+                continue  # token is in preamble — skip
+
+            # Map preprocessed line → original line (accounting for added import lines)
+            orig_line = pre_line
+            if pp.added_lines_before > 0:
+                if pre_line >= pp.added_line_position + pp.added_lines_before:
+                    orig_line = pre_line - pp.added_lines_before
+                elif pre_line >= pp.added_line_position:
+                    continue  # token on added import line — skip
+
+            # Get line mapping for column remapping
+            mapping = (
+                pp.line_mappings[orig_line]
+                if orig_line < len(pp.line_mappings)
+                else []
+            )
+
+            # Skip tokens that fall within a replacement region (e.g.
+            # __xonsh_env__["PATH"] replacing $PATH) — handled by pass 2.
+            if _token_in_replacement(mapping, abs_char, abs_char + length):
+                continue
+
+            # Map start and end positions back from preprocessed coordinates
+            orig_line, orig_char = map_position_from_processed(
+                pp, pre_line, abs_char
+            )
+            _, orig_end_char = map_position_from_processed(
+                pp, pre_line, abs_char + length
+            )
+
+            # Recompute length in original coordinates
+            orig_length = orig_end_char - orig_char
+            if orig_length <= 0:
+                continue  # token collapsed
+
+            # Filter masked lines
+            if orig_line in masked:
+                continue
+
+            # Remap token type and modifiers via legend remap arrays
+            if self._semantic_type_remap and token_type < len(self._semantic_type_remap):
+                token_type = self._semantic_type_remap[token_type]
+
+            if self._semantic_modifier_remap and token_modifiers != 0:
+                token_modifiers = self._remap_modifier_bitmask(token_modifiers)
+
+            remapped.append((orig_line, orig_char, orig_length, token_type, token_modifiers))
+
+        # Pass 2: emit synthetic tokens for xonsh replacement regions
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+        for rr_start_line, rr_start_col, rr_end_line, rr_end_col, rr_type in pp.replacement_regions:
+            if rr_start_line != rr_end_line:
+                continue  # skip multi-line replacements
+            if rr_start_line in masked:
+                continue
+            token_type_name = _XONSH_SEMANTIC_TOKEN_TYPES.get(rr_type)
+            if token_type_name and token_type_name in SEMANTIC_TOKEN_TYPES:
+                type_idx = SEMANTIC_TOKEN_TYPES.index(token_type_name)
+                remapped.append((rr_start_line, rr_start_col, rr_end_col - rr_start_col, type_idx, 0))
+
+        # Sort by (line, char) for proper delta encoding
+        remapped.sort(key=lambda t: (t[0], t[1]))
+
+        if not remapped:
+            return lsp.SemanticTokens(data=[])
+
+        # Re-encode to delta format
+        encoded: list[int] = []
+        prev_line = 0
+        prev_char = 0
+        for line, char, length, token_type, token_modifiers in remapped:
+            delta_line = line - prev_line
+            if delta_line > 0:
+                delta_char = char
+            else:
+                delta_char = char - prev_char
+
+            encoded.extend([delta_line, delta_char, length, token_type, token_modifiers])
+            prev_line = line
+            prev_char = char
+
+        return lsp.SemanticTokens(data=encoded)
+
+    def _remap_modifier_bitmask(self, bitmask: int) -> int:
+        """Remap a modifier bitmask using the pre-computed remap array."""
+        result = 0
+        for child_bit in range(len(self._semantic_modifier_remap)):
+            if bitmask & (1 << child_bit):
+                our_bit = self._semantic_modifier_remap[child_bit]
+                result |= 1 << our_bit
+        return result
+
+    def _build_semantic_legend_remap(self, init_result: lsp.InitializeResult) -> None:
+        """Build remap arrays from child's legend to our legend.
+
+        If the child's legend matches ours exactly, the remap is identity.
+        """
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS
+
+        caps = init_result.capabilities
+        provider = getattr(caps, 'semantic_tokens_provider', None)
+        if provider is None:
+            self._semantic_type_remap = []
+            self._semantic_modifier_remap = []
+            return
+
+        legend = provider.legend if hasattr(provider, 'legend') else None
+        if legend is None:
+            self._semantic_type_remap = []
+            self._semantic_modifier_remap = []
+            return
+
+        # Build type remap: child_index -> our_index
+        our_type_index = {name: i for i, name in enumerate(SEMANTIC_TOKEN_TYPES)}
+        self._semantic_type_remap = [
+            our_type_index.get(t, 0) for t in legend.token_types
+        ]
+
+        # Build modifier remap: child_bit -> our_bit
+        our_mod_index = {name: i for i, name in enumerate(SEMANTIC_TOKEN_MODIFIERS)}
+        self._semantic_modifier_remap = [
+            our_mod_index.get(m, 0) for m in legend.token_modifiers
+        ]
+
     def _remap_workspace_symbol_uri(self, symbol: lsp.WorkspaceSymbol) -> None:
         """Remap .py URIs back to original .xsh URIs in a workspace symbol."""
         loc = symbol.location
@@ -921,6 +1246,15 @@ class LspProxyBackend:
             await self._server.send_request_async(lsp.WORKSPACE_INLAY_HINT_REFRESH, None)
         except Exception as e:
             logger.debug(f"PROXY: inlay hint refresh forward failed: {e}")
+
+    async def _handle_semantic_tokens_refresh(self) -> None:
+        """Forward workspace/semanticTokens/refresh from child to editor."""
+        if self._server is None:
+            return
+        try:
+            await self._server.send_request_async(lsp.WORKSPACE_SEMANTIC_TOKENS_REFRESH, None)
+        except Exception as e:
+            logger.debug(f"PROXY: semantic tokens refresh forward failed: {e}")
 
     async def _handle_configuration_request(
         self, params: lsp.ConfigurationParams

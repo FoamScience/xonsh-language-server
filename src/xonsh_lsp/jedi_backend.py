@@ -463,6 +463,22 @@ class JediBackend:
     ) -> lsp.WorkspaceSymbol:
         return symbol
 
+    async def get_semantic_tokens(
+        self, source: str, path: str | None = None
+    ) -> lsp.SemanticTokens | None:
+        return None
+
+    async def get_semantic_tokens_range(
+        self,
+        source: str,
+        start_line: int,
+        start_char: int,
+        end_line: int,
+        end_char: int,
+        path: str | None = None,
+    ) -> lsp.SemanticTokens | None:
+        return None
+
     def _jedi_type_to_lsp_kind(self, jedi_type: str) -> lsp.CompletionItemKind:
         """Convert Jedi completion type to LSP completion item kind."""
         mapping = {
