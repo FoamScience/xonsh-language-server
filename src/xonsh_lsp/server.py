@@ -458,6 +458,37 @@ async def document_symbols(
 
 
 # ============================================================================
+# Folding Ranges
+# ============================================================================
+
+
+@server.feature(lsp.TEXT_DOCUMENT_FOLDING_RANGE)
+async def folding_range(params: lsp.FoldingRangeParams) -> list[lsp.FoldingRange] | None:
+    """Provide folding ranges."""
+    uri = params.text_document.uri
+    doc = server.get_document(uri)
+    if doc is None:
+        return None
+
+    raw_ranges = server.parser.get_folding_ranges(doc.source)
+
+    kind_map = {
+        "comment": lsp.FoldingRangeKind.Comment,
+        "imports": lsp.FoldingRangeKind.Imports,
+        "region": lsp.FoldingRangeKind.Region,
+    }
+
+    return [
+        lsp.FoldingRange(
+            start_line=r["start_line"],
+            end_line=r["end_line"],
+            kind=kind_map.get(r["kind"]),
+        )
+        for r in raw_ranges
+    ]
+
+
+# ============================================================================
 # Code Actions
 # ============================================================================
 

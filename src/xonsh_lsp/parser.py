@@ -387,6 +387,89 @@ class XonshParser:
         except Exception:
             return False
 
+    # Node types that produce folding ranges
+    FOLDABLE_BLOCK_TYPES = {
+        "function_definition", "class_definition",
+        "if_statement", "elif_clause", "else_clause",
+        "for_statement", "while_statement", "with_statement",
+        "try_statement", "except_clause", "finally_clause",
+        "match_statement", "case_clause",
+        "block_macro_statement", "decorated_definition",
+    }
+    FOLDABLE_BRACKET_TYPES = {
+        "argument_list", "parameters", "parenthesized_expression",
+        "list", "dictionary", "set", "tuple",
+    }
+
+    def get_folding_ranges(self, source: str) -> list[dict]:
+        """Extract folding ranges from source code.
+
+        Returns a list of dicts with keys:
+        - start_line: 0-based start line
+        - end_line: 0-based end line
+        - kind: "region", "comment", or "imports"
+        """
+        result = self.parse(source)
+        if result.tree is None:
+            return []
+
+        ranges: list[dict] = []
+        comment_lines: list[int] = []
+
+        def flush_comments() -> None:
+            if len(comment_lines) >= 2:
+                ranges.append({
+                    "start_line": comment_lines[0],
+                    "end_line": comment_lines[-1],
+                    "kind": "comment",
+                })
+            comment_lines.clear()
+
+        def visit(node: Node) -> None:
+            node_type = node.type
+            start_line = node.start_point[0]
+            end_line = node.end_point[0]
+
+            # Group consecutive comment lines
+            if node_type == "comment":
+                if comment_lines and start_line == comment_lines[-1] + 1:
+                    comment_lines.append(start_line)
+                else:
+                    flush_comments()
+                    comment_lines.append(start_line)
+                return
+
+            # Flush any pending comment group when we hit a non-comment
+            if comment_lines and node_type not in ("module", "block", "expression_statement"):
+                flush_comments()
+
+            if end_line > start_line:
+                if node_type in self.FOLDABLE_BLOCK_TYPES or node_type in self.FOLDABLE_BRACKET_TYPES:
+                    ranges.append({
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "kind": "region",
+                    })
+                elif node_type == "import_from_statement":
+                    ranges.append({
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "kind": "imports",
+                    })
+                elif node_type == "string":
+                    ranges.append({
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "kind": "comment",
+                    })
+
+            for child in node.children:
+                visit(child)
+
+        visit(result.tree.root_node)
+        flush_comments()
+        return ranges
+
     def get_document_symbols(self, source: str) -> list[dict]:
         """Extract document symbols from source code.
 
