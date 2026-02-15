@@ -687,3 +687,187 @@ class TestLspProxyBackendDiagnosticsMapping:
         assert diags[0].severity == lsp.DiagnosticSeverity.Warning
         assert diags[0].code == "testCode"
         assert diags[0].source == "pyright"
+
+
+class TestLspProxyBackendInlayHintsNotStarted:
+    """Test inlay hint methods when backend is not started."""
+
+    @pytest.fixture
+    def backend(self):
+        return LspProxyBackend(command=["pyright-langserver", "--stdio"])
+
+    @pytest.mark.asyncio
+    async def test_get_inlay_hints_not_started(self, backend):
+        result = await backend.get_inlay_hints("x = 1", 0, 1)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_inlay_hint_not_started(self, backend):
+        hint = lsp.InlayHint(
+            position=lsp.Position(line=0, character=5),
+            label=": int",
+        )
+        result = await backend.resolve_inlay_hint(hint)
+        assert result is hint
+
+
+class TestLspProxyBackendInlayHints:
+    """Test inlay hint passthrough with position mapping."""
+
+    def _make_backend(self):
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_pure_python_passthrough(self):
+        """Inlay hints on pure Python should pass through with unchanged positions."""
+        backend = self._make_backend()
+        backend._client.text_document_inlay_hint_async = AsyncMock(
+            return_value=[
+                lsp.InlayHint(
+                    position=lsp.Position(line=0, character=5),
+                    label=": int",
+                ),
+            ]
+        )
+
+        result = await backend.get_inlay_hints("x = 1\ny = 2", 0, 1, _test_path("file.py"))
+
+        assert len(result) == 1
+        assert result[0].position.line == 0
+        assert result[0].position.character == 5
+        assert result[0].label == ": int"
+
+    @pytest.mark.asyncio
+    async def test_preamble_offset_subtracted(self):
+        """Hint positions should have preamble offset subtracted."""
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+
+        backend = self._make_backend()
+
+        # Source with xonsh syntax triggers preamble
+        source = "x = $HOME\ny = 2"
+
+        # Sync document to populate state
+        backend._sync_document(source, _test_path("file.xsh"))
+        preamble = backend._preamble_offset(backend._file_uri(_test_path("file.xsh")))
+        assert preamble == _XONSH_PREAMBLE_LINE_COUNT
+
+        # Child returns hint on line preamble+1 (original line 1)
+        backend._client.text_document_inlay_hint_async = AsyncMock(
+            return_value=[
+                lsp.InlayHint(
+                    position=lsp.Position(line=preamble + 1, character=3),
+                    label=": int",
+                ),
+            ]
+        )
+
+        result = await backend.get_inlay_hints(source, 0, 2, _test_path("file.xsh"))
+
+        assert len(result) == 1
+        assert result[0].position.line == 1
+        assert result[0].label == ": int"
+
+    @pytest.mark.asyncio
+    async def test_preamble_hints_filtered(self):
+        """Hints on preamble lines should be filtered out."""
+        backend = self._make_backend()
+
+        source = "x = $HOME"
+        backend._sync_document(source, _test_path("file.xsh"))
+
+        # Child returns hint on preamble line 0
+        backend._client.text_document_inlay_hint_async = AsyncMock(
+            return_value=[
+                lsp.InlayHint(
+                    position=lsp.Position(line=0, character=0),
+                    label="preamble hint",
+                ),
+            ]
+        )
+
+        result = await backend.get_inlay_hints(source, 0, 1, _test_path("file.xsh"))
+
+        assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_masked_line_hints_filtered(self):
+        """Hints on masked xonsh lines should be filtered out."""
+        backend = self._make_backend()
+
+        # Line 1 (cd /tmp) will be masked
+        source = "import os\ncd /tmp\nx = 1"
+        backend._sync_document(source, _test_path("file.xsh"))
+        uri = backend._file_uri(_test_path("file.xsh"))
+        preamble = backend._preamble_offset(uri)
+
+        # Child returns hint on masked line
+        backend._client.text_document_inlay_hint_async = AsyncMock(
+            return_value=[
+                lsp.InlayHint(
+                    position=lsp.Position(line=preamble + 1, character=0),
+                    label="masked hint",
+                ),
+            ]
+        )
+
+        result = await backend.get_inlay_hints(source, 0, 3, _test_path("file.xsh"))
+
+        assert len(result) == 0
+
+    @pytest.mark.asyncio
+    async def test_none_result_returns_empty(self):
+        """None result from child should return empty list."""
+        backend = self._make_backend()
+        backend._client.text_document_inlay_hint_async = AsyncMock(return_value=None)
+
+        result = await backend.get_inlay_hints("x = 1", 0, 1, _test_path("file.py"))
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_forwards_to_child(self):
+        """resolve_inlay_hint should forward to child."""
+        backend = self._make_backend()
+        hint = lsp.InlayHint(
+            position=lsp.Position(line=0, character=5),
+            label=": int",
+        )
+        resolved = lsp.InlayHint(
+            position=lsp.Position(line=0, character=5),
+            label=": int",
+            tooltip="Integer type",
+        )
+        backend._client.inlay_hint_resolve_async = AsyncMock(return_value=resolved)
+
+        result = await backend.resolve_inlay_hint(hint)
+
+        backend._client.inlay_hint_resolve_async.assert_called_once_with(hint)
+        assert result.tooltip == "Integer type"
+
+
+class TestLspProxyBackendInlayHintRefresh:
+    """Test inlay hint refresh forwarding."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_forwarded_to_editor(self):
+        """workspace/inlayHint/refresh should be forwarded to editor."""
+        mock_server = MagicMock()
+        mock_server.send_request_async = AsyncMock(return_value=None)
+
+        backend = LspProxyBackend(command=["test"], server=mock_server)
+
+        await backend._handle_inlay_hint_refresh()
+
+        mock_server.send_request_async.assert_called_once_with(
+            lsp.WORKSPACE_INLAY_HINT_REFRESH, None
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_no_server(self):
+        """Refresh without server should not raise."""
+        backend = LspProxyBackend(command=["test"])
+        await backend._handle_inlay_hint_refresh()  # Should not raise
