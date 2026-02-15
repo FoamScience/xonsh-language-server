@@ -136,6 +136,11 @@ class LspProxyBackend:
         def on_progress(params: lsp.ProgressParams) -> None:
             self._handle_progress(params)
 
+        # Forward workspace/inlayHint/refresh from child to editor
+        @self._client.feature(lsp.WORKSPACE_INLAY_HINT_REFRESH)
+        async def on_inlay_hint_refresh(params: None) -> None:
+            await self._handle_inlay_hint_refresh()
+
         # Forward window/logMessage from child (avoids "unknown method" warnings)
         @self._client.feature(lsp.WINDOW_LOG_MESSAGE)
         def on_log_message(params: lsp.LogMessageParams) -> None:
@@ -176,10 +181,18 @@ class LspProxyBackend:
                             signature_help=lsp.SignatureHelpClientCapabilities(),
                             publish_diagnostics=lsp.PublishDiagnosticsClientCapabilities(),
                             document_symbol=lsp.DocumentSymbolClientCapabilities(),
+                            inlay_hint=lsp.InlayHintClientCapabilities(
+                                resolve_support=lsp.ClientInlayHintResolveOptions(
+                                    properties=["tooltip", "textEdits", "label.tooltip", "label.location"],
+                                ),
+                            ),
                         ),
                         workspace=lsp.WorkspaceClientCapabilities(
                             configuration=True,
                             workspace_folders=True,
+                            inlay_hint=lsp.InlayHintWorkspaceClientCapabilities(
+                                refresh_support=True,
+                            ),
                         ),
                         window=lsp.WindowClientCapabilities(
                             work_done_progress=True,
@@ -582,6 +595,85 @@ class LspProxyBackend:
             logger.debug(f"Proxy signature help error: {e}")
             return None
 
+    async def get_inlay_hints(
+        self, source: str, start_line: int, end_line: int, path: str | None = None
+    ) -> list[lsp.InlayHint]:
+        """Get inlay hints from the child LSP server."""
+        if not self._started or self._client is None:
+            return []
+
+        try:
+            preprocess_result = preprocess_with_mapping(source)
+            uri = self._file_uri(path)
+            self._sync_document(source, path)
+
+            preamble = self._preamble_offset(uri)
+
+            # Map range to preprocessed coordinates + preamble offset
+            mapped_start, _ = map_position_to_processed(preprocess_result, start_line, 0)
+            mapped_end, _ = map_position_to_processed(preprocess_result, end_line, 0)
+            mapped_start += preamble
+            mapped_end += preamble
+
+            result = await self._client.text_document_inlay_hint_async(
+                lsp.InlayHintParams(
+                    text_document=lsp.TextDocumentIdentifier(uri=uri),
+                    range=lsp.Range(
+                        start=lsp.Position(line=mapped_start, character=0),
+                        end=lsp.Position(line=mapped_end, character=0),
+                    ),
+                )
+            )
+
+            if result is None:
+                return []
+
+            masked = preprocess_result.masked_lines
+            hints: list[lsp.InlayHint] = []
+            for hint in result:
+                orig_line = hint.position.line - preamble
+                if orig_line < 0:
+                    continue  # preamble hint
+
+                orig_line, orig_col = map_position_from_processed(
+                    preprocess_result, orig_line, hint.position.character
+                )
+
+                if orig_line in masked:
+                    continue
+
+                hints.append(
+                    lsp.InlayHint(
+                        position=lsp.Position(line=orig_line, character=orig_col),
+                        label=hint.label,
+                        kind=hint.kind,
+                        text_edits=hint.text_edits,
+                        tooltip=hint.tooltip,
+                        padding_left=hint.padding_left,
+                        padding_right=hint.padding_right,
+                        data=hint.data,
+                    )
+                )
+
+            return hints
+
+        except Exception as e:
+            logger.debug(f"Proxy inlay hints error: {e}")
+            return []
+
+    async def resolve_inlay_hint(
+        self, hint: lsp.InlayHint, path: str | None = None
+    ) -> lsp.InlayHint:
+        """Resolve additional details for an inlay hint."""
+        if not self._started or self._client is None:
+            return hint
+
+        try:
+            return await self._client.inlay_hint_resolve_async(hint)
+        except Exception as e:
+            logger.debug(f"Proxy inlay hint resolve error: {e}")
+            return hint
+
     def _normalize_locations(
         self,
         result: Any,
@@ -748,6 +840,15 @@ class LspProxyBackend:
                 )
         except Exception as e:
             logger.debug(f"PROXY: progress forward failed: {e}")
+
+    async def _handle_inlay_hint_refresh(self) -> None:
+        """Forward workspace/inlayHint/refresh from child to editor."""
+        if self._server is None:
+            return
+        try:
+            await self._server.send_request_async(lsp.WORKSPACE_INLAY_HINT_REFRESH, None)
+        except Exception as e:
+            logger.debug(f"PROXY: inlay hint refresh forward failed: {e}")
 
     async def _handle_configuration_request(
         self, params: lsp.ConfigurationParams

@@ -141,3 +141,39 @@ class PythonBackend(Protocol):
             Signature help, or None.
         """
         ...
+
+    async def get_inlay_hints(
+        self,
+        source: str,
+        start_line: int,
+        end_line: int,
+        path: str | None = None,
+    ) -> list[lsp.InlayHint]:
+        """Get inlay hints for the given line range.
+
+        Args:
+            source: The original xonsh source code.
+            start_line: 0-based start line of the range.
+            end_line: 0-based end line of the range.
+            path: Optional file path for context.
+
+        Returns:
+            List of inlay hints.
+        """
+        ...
+
+    async def resolve_inlay_hint(
+        self,
+        hint: lsp.InlayHint,
+        path: str | None = None,
+    ) -> lsp.InlayHint:
+        """Resolve additional details for an inlay hint.
+
+        Args:
+            hint: The inlay hint to resolve.
+            path: Optional file path for context.
+
+        Returns:
+            The resolved inlay hint.
+        """
+        ...

@@ -439,6 +439,22 @@ class JediBackend:
             logger.debug(f"Jedi signature help error: {e}")
             return None
 
+    async def get_inlay_hints(
+        self,
+        source: str,
+        start_line: int,
+        end_line: int,
+        path: str | None = None,
+    ) -> list[lsp.InlayHint]:
+        return []
+
+    async def resolve_inlay_hint(
+        self,
+        hint: lsp.InlayHint,
+        path: str | None = None,
+    ) -> lsp.InlayHint:
+        return hint
+
     def _jedi_type_to_lsp_kind(self, jedi_type: str) -> lsp.CompletionItemKind:
         """Convert Jedi completion type to LSP completion item kind."""
         mapping = {

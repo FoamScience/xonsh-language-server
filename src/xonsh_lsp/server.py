@@ -489,6 +489,34 @@ async def folding_range(params: lsp.FoldingRangeParams) -> list[lsp.FoldingRange
 
 
 # ============================================================================
+# Inlay Hints
+# ============================================================================
+
+
+@server.feature(lsp.TEXT_DOCUMENT_INLAY_HINT)
+async def inlay_hint(params: lsp.InlayHintParams) -> list[lsp.InlayHint] | None:
+    """Provide inlay hints."""
+    uri = params.text_document.uri
+    doc = server.get_document(uri)
+    if doc is None:
+        return None
+
+    hints = await server.python_delegate.get_inlay_hints(
+        doc.source,
+        params.range.start.line,
+        params.range.end.line,
+        doc.path,
+    )
+    return hints or None
+
+
+@server.feature(lsp.INLAY_HINT_RESOLVE)
+async def inlay_hint_resolve(hint: lsp.InlayHint) -> lsp.InlayHint:
+    """Resolve additional inlay hint details."""
+    return await server.python_delegate.resolve_inlay_hint(hint)
+
+
+# ============================================================================
 # Code Actions
 # ============================================================================
 
