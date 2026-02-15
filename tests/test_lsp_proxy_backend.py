@@ -6,7 +6,7 @@ from pathlib import Path, PurePosixPath
 from unittest.mock import AsyncMock, MagicMock
 
 from lsprotocol import types as lsp
-from xonsh_lsp.lsp_proxy_backend import LspProxyBackend, KNOWN_BACKENDS
+from xonsh_lsp.lsp_proxy_backend import LspProxyBackend, KNOWN_BACKENDS, _token_in_replacement
 
 
 def _test_path(name: str) -> str:
@@ -542,11 +542,11 @@ class TestLspProxyBackendPreamble:
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
         assert "__xonsh_Path__" in text
-        assert "class __xonsh_Path__:" in text
+        assert "class __xonsh_Path__(" in text
         assert backend._sync_state[uri].preamble_lines > 0
 
-    def test_path_replaced_with_xonsh_path(self):
-        """Path( calls should be replaced with __xonsh_Path__( in sync output."""
+    def test_path_aliased_to_xonsh_path(self):
+        """Path should be aliased to __xonsh_Path__ via import replacement."""
         backend = LspProxyBackend(command=["test"])
         backend._client = MagicMock()
         backend._started = True
@@ -555,9 +555,11 @@ class TestLspProxyBackendPreamble:
         uri, _ = backend._sync_document(source, _test_path("file.xsh"))
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
-        assert "__xonsh_Path__('/tmp/dir')" in text
-        # The from pathlib import Path should NOT be replaced
-        assert "from pathlib import Path" in text
+        # The import should be replaced with an alias
+        assert "Path = __xonsh_Path__" in text
+        assert "from pathlib import Path" not in text
+        # Path( should stay as Path( (no column shift)
+        assert "Path('/tmp/dir')" in text
 
     def test_sync_document_stores_masked_lines(self):
         """Sync state should record which original lines were masked (via preprocess_result)."""
@@ -1097,3 +1099,608 @@ class TestLspProxyBackendWorkspaceSymbols:
         result = await backend.resolve_workspace_symbol(symbol)
 
         assert result.location.uri == "file:///test/plain.py"
+
+
+class TestLspProxyBackendSemanticTokensNotStarted:
+    """Test semantic token methods when backend is not started."""
+
+    @pytest.fixture
+    def backend(self):
+        return LspProxyBackend(command=["pyright-langserver", "--stdio"])
+
+    @pytest.mark.asyncio
+    async def test_get_semantic_tokens_not_started(self, backend):
+        result = await backend.get_semantic_tokens("x = 1")
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_get_semantic_tokens_range_not_started(self, backend):
+        result = await backend.get_semantic_tokens_range("x = 1", 0, 0, 0, 5)
+        assert result is None
+
+
+class TestLspProxyBackendSemanticTokens:
+    """Test semantic token passthrough with position mapping and legend remap."""
+
+    def _make_backend(self):
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_pure_python_passthrough(self):
+        """Semantic tokens on pure Python should pass through with unchanged positions."""
+        backend = self._make_backend()
+
+        # Delta-encoded tokens: (line=0, char=0, len=1, type=0, mods=0),
+        #                        (line=0, char=4, len=1, type=0, mods=0)
+        child_data = [0, 0, 1, 0, 0, 0, 4, 1, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("x = 1", _test_path("file.py"))
+
+        assert result is not None
+        assert result.data == child_data
+
+    @pytest.mark.asyncio
+    async def test_preamble_offset_subtracted(self):
+        """Token positions should have preamble offset subtracted."""
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+
+        backend = self._make_backend()
+
+        source = "x = $HOME\ny = 2"
+        backend._sync_document(source, _test_path("file.xsh"))
+        uri = backend._file_uri(_test_path("file.xsh"))
+        preamble = backend._preamble_offset(uri)
+        assert preamble == _XONSH_PREAMBLE_LINE_COUNT
+
+        # Token on child line preamble+1, char=0, len=1
+        child_data = [preamble + 1, 0, 1, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens(source, _test_path("file.xsh"))
+
+        assert result is not None
+        # 2 tokens: synthetic $HOME (line 0) + y (line 1)
+        assert len(result.data) == 10
+        # First token: synthetic $HOME at line 0, col 4
+        var_idx = SEMANTIC_TOKEN_TYPES.index("variable")
+        assert result.data[0] == 0  # line 0
+        assert result.data[1] == 4  # col 4
+        assert result.data[2] == 5  # len("$HOME")
+        assert result.data[3] == var_idx
+        # Second token: y at line 1
+        assert result.data[5] == 1  # delta_line = 1
+
+    @pytest.mark.asyncio
+    async def test_preamble_tokens_filtered(self):
+        """Tokens on preamble lines should be filtered out, but synthetic tokens still emitted."""
+        backend = self._make_backend()
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+
+        source = "x = $HOME"
+        backend._sync_document(source, _test_path("file.xsh"))
+
+        # Token on preamble line 0 — should be filtered
+        child_data = [0, 0, 5, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens(source, _test_path("file.xsh"))
+
+        assert result is not None
+        # Preamble token filtered, but synthetic $HOME token emitted
+        var_idx = SEMANTIC_TOKEN_TYPES.index("variable")
+        assert len(result.data) == 5
+        assert result.data[0] == 0  # line 0
+        assert result.data[1] == 4  # col 4 ($HOME starts at col 4)
+        assert result.data[2] == 5  # len("$HOME")
+        assert result.data[3] == var_idx
+
+    @pytest.mark.asyncio
+    async def test_masked_line_tokens_filtered(self):
+        """Tokens on masked xonsh lines should be filtered out."""
+        backend = self._make_backend()
+
+        # Line 1 (cd /tmp) will be masked
+        source = "import os\ncd /tmp\nx = 1"
+        backend._sync_document(source, _test_path("file.xsh"))
+        uri = backend._file_uri(_test_path("file.xsh"))
+        preamble = backend._preamble_offset(uri)
+
+        # Token on masked line (preamble + 1)
+        child_data = [preamble + 1, 0, 4, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens(source, _test_path("file.xsh"))
+
+        assert result is not None
+        assert result.data == []
+
+    @pytest.mark.asyncio
+    async def test_none_result_returns_none(self):
+        """None result from child should return None."""
+        backend = self._make_backend()
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=None
+        )
+
+        result = await backend.get_semantic_tokens("x = 1", _test_path("file.py"))
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_empty_data_returns_empty(self):
+        """Empty data from child should return empty data."""
+        backend = self._make_backend()
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=[])
+        )
+
+        result = await backend.get_semantic_tokens("x = 1", _test_path("file.py"))
+
+        assert result is not None
+        assert result.data == []
+
+    @pytest.mark.asyncio
+    async def test_delta_encoding_output(self):
+        """Output should be correctly re-encoded in delta format."""
+        backend = self._make_backend()
+
+        # Two tokens on different lines: (line=0, char=0) and (line=2, char=4)
+        # Delta: [0,0,1,0,0, 2,4,1,0,0]
+        child_data = [0, 0, 1, 0, 0, 2, 4, 1, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("x = 1\n\ny = 2", _test_path("file.py"))
+
+        assert result is not None
+        # Should preserve delta encoding
+        assert result.data == [0, 0, 1, 0, 0, 2, 4, 1, 0, 0]
+
+    @pytest.mark.asyncio
+    async def test_delta_encoding_same_line(self):
+        """Tokens on the same line should have delta_char relative to previous."""
+        backend = self._make_backend()
+
+        # Two tokens on same line: (line=0, char=0, len=1) and (line=0, char=4, len=1)
+        # Input delta: [0,0,1,0,0, 0,4,1,0,0]
+        child_data = [0, 0, 1, 0, 0, 0, 4, 1, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("x = y", _test_path("file.py"))
+
+        assert result is not None
+        assert result.data == [0, 0, 1, 0, 0, 0, 4, 1, 0, 0]
+
+    @pytest.mark.asyncio
+    async def test_legend_type_remapping(self):
+        """Child token type indices should be remapped to our legend."""
+        backend = self._make_backend()
+
+        # Set up a remap where child type 0 maps to our type 5
+        backend._semantic_type_remap = [5, 2, 0]
+
+        # Token with type=0 in child's legend
+        child_data = [0, 0, 3, 0, 0]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("foo", _test_path("file.py"))
+
+        assert result is not None
+        # Type should be remapped from 0 -> 5
+        assert result.data[3] == 5
+
+    @pytest.mark.asyncio
+    async def test_legend_modifier_remapping(self):
+        """Child modifier bitmask should be remapped to our legend."""
+        backend = self._make_backend()
+
+        # Child bit 0 -> our bit 2, child bit 1 -> our bit 0
+        backend._semantic_modifier_remap = [2, 0]
+
+        # Token with modifier bitmask 0b01 (child bit 0 set)
+        child_data = [0, 0, 3, 0, 1]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("foo", _test_path("file.py"))
+
+        assert result is not None
+        # Bit 0 in child -> bit 2 in ours = 0b100 = 4
+        assert result.data[4] == 4
+
+    @pytest.mark.asyncio
+    async def test_modifier_remap_multiple_bits(self):
+        """Multiple modifier bits should be remapped independently."""
+        backend = self._make_backend()
+
+        # Child bit 0 -> our bit 2, child bit 1 -> our bit 0
+        backend._semantic_modifier_remap = [2, 0]
+
+        # Both bits set: 0b11 = 3
+        child_data = [0, 0, 3, 0, 3]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("foo", _test_path("file.py"))
+
+        assert result is not None
+        # bit0->bit2 (4) + bit1->bit0 (1) = 5
+        assert result.data[4] == 5
+
+    @pytest.mark.asyncio
+    async def test_replacement_region_gets_synthetic_token(self):
+        """Tokens in replacement regions should be replaced by a single synthetic token."""
+        backend = self._make_backend()
+
+        # $PATH.append('/tmp')
+        # Preprocessed: __xonsh_env__["PATH"].append('/tmp')
+        source = "$PATH.append('/tmp')"
+        backend._sync_document(source, _test_path("file.xsh"))
+
+        # __xonsh_env__ at col 0, len 13 — inside replacement
+        # "PATH" at col 14, len 6 — inside replacement
+        # append at col 22, len 6 — outside replacement
+        # '/tmp' at col 29, len 6 — outside replacement
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+        uri = backend._file_uri(_test_path("file.xsh"))
+        preamble = backend._preamble_offset(uri)
+        child_data = [
+            preamble, 0, 13, 8, 0,     # __xonsh_env__ (in replacement)
+            0, 14, 6, 9, 0,            # "PATH" (in replacement, delta=14)
+            0, 8, 6, 6, 0,             # append (delta=22-14=8)
+            0, 7, 6, 9, 0,             # '/tmp' (delta=29-22=7)
+        ]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens(source, _test_path("file.xsh"))
+
+        assert result is not None
+        # Should have 3 tokens: synthetic $PATH + append + '/tmp'
+        assert len(result.data) == 15  # 3 tokens * 5 values each
+
+        # First token: synthetic $PATH at col 0, length 5
+        var_idx = SEMANTIC_TOKEN_TYPES.index("variable")
+        assert result.data[0] == 0  # delta line
+        assert result.data[1] == 0  # delta char (col 0)
+        assert result.data[2] == 5  # length of "$PATH"
+        assert result.data[3] == var_idx  # "variable" type
+
+        # Second token: append at original col 6
+        assert result.data[5] == 0  # same line
+        assert result.data[6] == 6  # delta char from 0 → 6
+        assert result.data[7] == 6  # length of "append"
+
+    @pytest.mark.asyncio
+    async def test_synthetic_tokens_for_multiple_replacements(self):
+        """Multiple xonsh constructs on one line each get a synthetic token."""
+        backend = self._make_backend()
+
+        # x = $HOME + $PATH
+        source = "x = $HOME + $PATH"
+        backend._sync_document(source, _test_path("file.xsh"))
+
+        from xonsh_lsp.lsp_proxy_backend import _XONSH_PREAMBLE_LINE_COUNT
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+        uri = backend._file_uri(_test_path("file.xsh"))
+        preamble = backend._preamble_offset(uri)
+
+        # Child sends only replacement tokens (pyright might highlight __xonsh_env__)
+        child_data = [
+            preamble, 4, 13, 8, 0,   # __xonsh_env__ for $HOME (in replacement)
+            0, 28, 13, 8, 0,          # __xonsh_env__ for $PATH (in replacement)
+        ]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens(source, _test_path("file.xsh"))
+
+        assert result is not None
+        var_idx = SEMANTIC_TOKEN_TYPES.index("variable")
+
+        # Should have 2 synthetic tokens: $HOME and $PATH
+        assert len(result.data) == 10
+        # First: $HOME at col 4, len 5
+        assert result.data[1] == 4
+        assert result.data[2] == 5
+        assert result.data[3] == var_idx
+        # Second: $PATH at col 12, len 5
+        assert result.data[6] == 8  # delta_char = 12 - 4 = 8
+        assert result.data[7] == 5
+        assert result.data[8] == var_idx
+
+    @pytest.mark.asyncio
+    async def test_path_string_highlighting_correct_columns(self):
+        """p'/etc/passwd'.read_text().find('root') should have correct token positions."""
+        backend = self._make_backend()
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+
+        source = "p'/etc/passwd'.read_text().find('root')"
+        backend._sync_document(source, _test_path("file.xsh"))
+        uri = backend._file_uri(_test_path("file.xsh"))
+        preamble = backend._preamble_offset(uri)
+        pp = backend._sync_state[uri].preprocess_result
+
+        # Verify no column shift: child sees Path( not __xonsh_Path__(
+        text = backend._client.text_document_did_open.call_args[0][0].text_document.text
+        child_lines = text.split("\n")
+        source_line = child_lines[preamble + pp.added_lines_before]
+        assert source_line.startswith("Path(")  # NOT __xonsh_Path__(
+
+        # Child tokens (based on Path('/etc/passwd').read_text().find('root')):
+        # Path at col 0 (in replacement), read_text at col 20, find at col 32, 'root' at col 37
+        child_line = preamble + pp.added_lines_before
+        child_data = [
+            child_line, 0, 4, 0, 0,     # Path (in replacement)
+            0, 5, 13, 18, 0,            # '/etc/passwd' at col 5, len 13, type string
+            0, 15, 9, 13, 0,            # read_text at col 20, len 9, type method (delta=15)
+            0, 12, 4, 13, 0,            # find at col 32, len 4, type method (delta=12)
+            0, 5, 6, 18, 0,             # 'root' at col 37, len 6, type string (delta=5)
+        ]
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens(source, _test_path("file.xsh"))
+
+        assert result is not None
+        string_idx = SEMANTIC_TOKEN_TYPES.index("string")
+        method_idx = SEMANTIC_TOKEN_TYPES.index("method")
+
+        # Decode tokens to check positions
+        tokens = []
+        line, char = 0, 0
+        for i in range(0, len(result.data), 5):
+            dl, dc, length, tt, tm = result.data[i:i+5]
+            if dl > 0:
+                line += dl
+                char = dc
+            else:
+                char += dc
+            tokens.append((line, char, length, tt))
+
+        # Should have: synthetic path_string + read_text + find + 'root'
+        # (Path and '/etc/passwd' are in replacement → filtered from child,
+        #  but synthetic token emitted for p'/etc/passwd')
+        assert len(tokens) >= 3
+
+        # Synthetic token for p'/etc/passwd': line 0, col 0, len 14, type string
+        assert tokens[0] == (0, 0, 14, string_idx)
+
+        # read_text: should be at original col 15 (.read_text starts at col 14, r at 15)
+        assert tokens[1][0] == 0  # same line
+        assert tokens[1][1] == 15  # original col of read_text
+        assert tokens[1][2] == 9  # length
+        assert tokens[1][3] == method_idx
+
+        # find: should be at original col 27 (.find starts at col 26, f at 27)
+        assert tokens[2][0] == 0
+        assert tokens[2][1] == 27
+        assert tokens[2][2] == 4
+        assert tokens[2][3] == method_idx
+
+        # 'root': should be at original col 32
+        assert tokens[3][0] == 0
+        assert tokens[3][1] == 32
+        assert tokens[3][2] == 6
+        assert tokens[3][3] == string_idx
+
+    @pytest.mark.asyncio
+    async def test_token_length_remapped(self):
+        """Token lengths should be recomputed in original coordinates."""
+        backend = self._make_backend()
+
+        # Pure python: positions are 1:1 so length stays the same
+        child_data = [0, 0, 5, 0, 0]  # 5-char token at col 0
+        backend._client.text_document_semantic_tokens_full_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens("hello = 1", _test_path("file.py"))
+
+        assert result is not None
+        assert result.data[2] == 5  # length preserved for 1:1 mapping
+
+
+class TestLspProxyBackendSemanticTokensRange:
+    """Test semantic token range request."""
+
+    def _make_backend(self):
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_range_positions_mapped(self):
+        """Range positions should be mapped to preprocessed coordinates."""
+        backend = self._make_backend()
+
+        child_data = [0, 0, 1, 0, 0]
+        backend._client.text_document_semantic_tokens_range_async = AsyncMock(
+            return_value=lsp.SemanticTokens(data=child_data)
+        )
+
+        result = await backend.get_semantic_tokens_range(
+            "x = 1\ny = 2", 0, 0, 1, 5, _test_path("file.py")
+        )
+
+        assert result is not None
+        backend._client.text_document_semantic_tokens_range_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_range_none_result(self):
+        """None result from child range request should return None."""
+        backend = self._make_backend()
+        backend._client.text_document_semantic_tokens_range_async = AsyncMock(
+            return_value=None
+        )
+
+        result = await backend.get_semantic_tokens_range(
+            "x = 1", 0, 0, 0, 5, _test_path("file.py")
+        )
+
+        assert result is None
+
+
+class TestLspProxyBackendSemanticTokensRefresh:
+    """Test semantic tokens refresh forwarding."""
+
+    @pytest.mark.asyncio
+    async def test_refresh_forwarded_to_editor(self):
+        """workspace/semanticTokens/refresh should be forwarded to editor."""
+        mock_server = MagicMock()
+        mock_server.send_request_async = AsyncMock(return_value=None)
+
+        backend = LspProxyBackend(command=["test"], server=mock_server)
+
+        await backend._handle_semantic_tokens_refresh()
+
+        mock_server.send_request_async.assert_called_once_with(
+            lsp.WORKSPACE_SEMANTIC_TOKENS_REFRESH, None
+        )
+
+    @pytest.mark.asyncio
+    async def test_refresh_no_server(self):
+        """Refresh without server should not raise."""
+        backend = LspProxyBackend(command=["test"])
+        await backend._handle_semantic_tokens_refresh()  # Should not raise
+
+
+class TestLspProxyBackendSemanticLegendRemap:
+    """Test semantic token legend remap building."""
+
+    def test_matching_legend_is_identity(self):
+        """When child legend matches ours, remap should be identity."""
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS
+
+        backend = LspProxyBackend(command=["test"])
+
+        init_result = lsp.InitializeResult(
+            capabilities=lsp.ServerCapabilities(
+                semantic_tokens_provider=lsp.SemanticTokensOptions(
+                    legend=lsp.SemanticTokensLegend(
+                        token_types=SEMANTIC_TOKEN_TYPES,
+                        token_modifiers=SEMANTIC_TOKEN_MODIFIERS,
+                    ),
+                    full=True,
+                ),
+            ),
+        )
+
+        backend._build_semantic_legend_remap(init_result)
+
+        # Identity: each index maps to itself
+        assert backend._semantic_type_remap == list(range(len(SEMANTIC_TOKEN_TYPES)))
+        assert backend._semantic_modifier_remap == list(range(len(SEMANTIC_TOKEN_MODIFIERS)))
+
+    def test_subset_legend_remaps_correctly(self):
+        """When child has a subset of types, they should map to correct indices."""
+        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES
+
+        backend = LspProxyBackend(command=["test"])
+
+        child_types = ["function", "variable", "class"]
+        init_result = lsp.InitializeResult(
+            capabilities=lsp.ServerCapabilities(
+                semantic_tokens_provider=lsp.SemanticTokensOptions(
+                    legend=lsp.SemanticTokensLegend(
+                        token_types=child_types,
+                        token_modifiers=[],
+                    ),
+                    full=True,
+                ),
+            ),
+        )
+
+        backend._build_semantic_legend_remap(init_result)
+
+        assert len(backend._semantic_type_remap) == 3
+        assert backend._semantic_type_remap[0] == SEMANTIC_TOKEN_TYPES.index("function")
+        assert backend._semantic_type_remap[1] == SEMANTIC_TOKEN_TYPES.index("variable")
+        assert backend._semantic_type_remap[2] == SEMANTIC_TOKEN_TYPES.index("class")
+
+    def test_no_provider_gives_empty_arrays(self):
+        """When child has no semantic tokens provider, remap arrays should be empty."""
+        backend = LspProxyBackend(command=["test"])
+
+        init_result = lsp.InitializeResult(
+            capabilities=lsp.ServerCapabilities(),
+        )
+
+        backend._build_semantic_legend_remap(init_result)
+
+        assert backend._semantic_type_remap == []
+        assert backend._semantic_modifier_remap == []
+
+    def test_unknown_types_default_to_zero(self):
+        """Unknown type names in child legend should default to index 0."""
+        backend = LspProxyBackend(command=["test"])
+
+        init_result = lsp.InitializeResult(
+            capabilities=lsp.ServerCapabilities(
+                semantic_tokens_provider=lsp.SemanticTokensOptions(
+                    legend=lsp.SemanticTokensLegend(
+                        token_types=["unknownCustomType"],
+                        token_modifiers=["unknownCustomMod"],
+                    ),
+                    full=True,
+                ),
+            ),
+        )
+
+        backend._build_semantic_legend_remap(init_result)
+
+        assert backend._semantic_type_remap == [0]
+        assert backend._semantic_modifier_remap == [0]
+
+
+class TestTokenInReplacement:
+    """Test _token_in_replacement helper."""
+
+    def test_token_in_replacement_region(self):
+        """Token within a non-1:1 segment should be detected."""
+        # Mapping: orig 0-4 -> proc 0-20, orig 5-20 -> proc 21-36
+        mapping = [(0, 0), (5, 21), (20, 36)]
+        # Token at proc 0-13 (within the 0-21 replacement)
+        assert _token_in_replacement(mapping, 0, 13) is True
+
+    def test_token_in_identity_region(self):
+        """Token within a 1:1 segment should not be flagged."""
+        # Mapping: orig 0-4 -> proc 0-20, orig 5-20 -> proc 21-36
+        mapping = [(0, 0), (5, 21), (20, 36)]
+        # Token at proc 22-28 (within the 1:1 region)
+        assert _token_in_replacement(mapping, 22, 28) is False
+
+    def test_empty_mapping(self):
+        """Empty mapping should return False."""
+        assert _token_in_replacement([], 0, 5) is False
+
+    def test_token_spanning_segments(self):
+        """Token spanning across segments should return False (not fully in one)."""
+        mapping = [(0, 0), (5, 21), (20, 36)]
+        # Token from proc 15 to 25 (spans replacement and identity)
+        assert _token_in_replacement(mapping, 15, 25) is False

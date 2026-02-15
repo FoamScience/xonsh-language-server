@@ -100,3 +100,58 @@ class TestCompletionResolve:
         )
         resolved = provider.resolve_completion(item)
         assert resolved.documentation is not None
+
+
+class TestEnvVarMethodCompletions:
+    """Test $VAR. method completions."""
+
+    @pytest.fixture
+    def mock_server(self):
+        return MagicMock()
+
+    @pytest.fixture
+    def provider(self, mock_server):
+        return XonshCompletionProvider(mock_server)
+
+    def test_path_dot_returns_envpath_methods(self, provider):
+        """$PATH. should return EnvPath methods like append, prepend."""
+        completions = provider._get_env_var_method_completions("$PATH.")
+        labels = [c.label for c in completions]
+        assert "append" in labels
+        assert "prepend" in labels
+        assert "insert" in labels
+        assert "remove" in labels
+        assert "add" in labels
+
+    def test_path_dot_partial_filters(self, provider):
+        """$PATH.ap should still return completions (no filtering here)."""
+        completions = provider._get_env_var_method_completions("$PATH.ap")
+        # Method returns all EnvPath methods regardless of partial
+        assert len(completions) > 0
+
+    def test_non_envpath_var_returns_empty(self, provider):
+        """$AUTO_CD. (bool type) should return no method completions."""
+        completions = provider._get_env_var_method_completions("$AUTO_CD.")
+        assert completions == []
+
+    def test_unknown_var_returns_empty(self, provider):
+        """$UNKNOWN_VAR. should return no method completions."""
+        completions = provider._get_env_var_method_completions("$UNKNOWN_VAR.")
+        assert completions == []
+
+    def test_no_dollar_sign_returns_empty(self, provider):
+        """Text without $ should return no method completions."""
+        completions = provider._get_env_var_method_completions("foo.bar")
+        assert completions == []
+
+    def test_completion_items_are_methods(self, provider):
+        """Completion items should have Method kind."""
+        completions = provider._get_env_var_method_completions("$PATH.")
+        for item in completions:
+            assert item.kind == lsp.CompletionItemKind.Method
+
+    def test_pathext_also_returns_methods(self, provider):
+        """$PATHEXT is also EnvPath type, should return methods."""
+        completions = provider._get_env_var_method_completions("$PATHEXT.")
+        labels = [c.label for c in completions]
+        assert "append" in labels
