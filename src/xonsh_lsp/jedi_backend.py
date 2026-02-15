@@ -455,6 +455,14 @@ class JediBackend:
     ) -> lsp.InlayHint:
         return hint
 
+    async def get_workspace_symbols(self, query: str) -> list[lsp.WorkspaceSymbol]:
+        return []
+
+    async def resolve_workspace_symbol(
+        self, symbol: lsp.WorkspaceSymbol
+    ) -> lsp.WorkspaceSymbol:
+        return symbol
+
     def _jedi_type_to_lsp_kind(self, jedi_type: str) -> lsp.CompletionItemKind:
         """Convert Jedi completion type to LSP completion item kind."""
         mapping = {

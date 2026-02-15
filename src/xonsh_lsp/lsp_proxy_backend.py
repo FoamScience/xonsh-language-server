@@ -193,6 +193,11 @@ class LspProxyBackend:
                             inlay_hint=lsp.InlayHintWorkspaceClientCapabilities(
                                 refresh_support=True,
                             ),
+                            symbol=lsp.WorkspaceSymbolClientCapabilities(
+                                resolve_support=lsp.ClientSymbolResolveOptions(
+                                    properties=["location.range"],
+                                ),
+                            ),
                         ),
                         window=lsp.WindowClientCapabilities(
                             work_done_progress=True,
@@ -673,6 +678,73 @@ class LspProxyBackend:
         except Exception as e:
             logger.debug(f"Proxy inlay hint resolve error: {e}")
             return hint
+
+    async def get_workspace_symbols(self, query: str) -> list[lsp.WorkspaceSymbol]:
+        """Search for symbols across the workspace via the child LSP server."""
+        if not self._started or self._client is None:
+            return []
+
+        try:
+            result = await self._client.workspace_symbol_async(
+                lsp.WorkspaceSymbolParams(query=query)
+            )
+
+            if result is None:
+                return []
+
+            symbols: list[lsp.WorkspaceSymbol] = []
+            for item in result:
+                if isinstance(item, lsp.WorkspaceSymbol):
+                    self._remap_workspace_symbol_uri(item)
+                    symbols.append(item)
+                elif isinstance(item, lsp.SymbolInformation):
+                    # Convert SymbolInformation to WorkspaceSymbol
+                    original_uri = self._uri_map.get(
+                        item.location.uri, item.location.uri
+                    )
+                    symbols.append(
+                        lsp.WorkspaceSymbol(
+                            name=item.name,
+                            kind=item.kind,
+                            location=lsp.Location(
+                                uri=original_uri,
+                                range=item.location.range,
+                            ),
+                            container_name=item.container_name,
+                        )
+                    )
+
+            return symbols
+
+        except Exception as e:
+            logger.debug(f"Proxy workspace symbols error: {e}")
+            return []
+
+    async def resolve_workspace_symbol(
+        self, symbol: lsp.WorkspaceSymbol
+    ) -> lsp.WorkspaceSymbol:
+        """Resolve additional details for a workspace symbol."""
+        if not self._started or self._client is None:
+            return symbol
+
+        try:
+            resolved = await self._client.workspace_symbol_resolve_async(symbol)
+            self._remap_workspace_symbol_uri(resolved)
+            return resolved
+        except Exception as e:
+            logger.debug(f"Proxy workspace symbol resolve error: {e}")
+            return symbol
+
+    def _remap_workspace_symbol_uri(self, symbol: lsp.WorkspaceSymbol) -> None:
+        """Remap .py URIs back to original .xsh URIs in a workspace symbol."""
+        loc = symbol.location
+        if isinstance(loc, lsp.Location):
+            original_uri = self._uri_map.get(loc.uri, loc.uri)
+            if original_uri != loc.uri:
+                symbol.location = lsp.Location(
+                    uri=original_uri,
+                    range=loc.range,
+                )
 
     def _normalize_locations(
         self,

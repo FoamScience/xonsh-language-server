@@ -517,6 +517,24 @@ async def inlay_hint_resolve(hint: lsp.InlayHint) -> lsp.InlayHint:
 
 
 # ============================================================================
+# Workspace Symbols
+# ============================================================================
+
+
+@server.feature(lsp.WORKSPACE_SYMBOL)
+async def workspace_symbol(params: lsp.WorkspaceSymbolParams) -> list[lsp.WorkspaceSymbol] | None:
+    """Provide workspace symbol search."""
+    symbols = await server.python_delegate.get_workspace_symbols(params.query)
+    return symbols or None
+
+
+@server.feature(lsp.WORKSPACE_SYMBOL_RESOLVE)
+async def workspace_symbol_resolve(symbol: lsp.WorkspaceSymbol) -> lsp.WorkspaceSymbol:
+    """Resolve additional workspace symbol details."""
+    return await server.python_delegate.resolve_workspace_symbol(symbol)
+
+
+# ============================================================================
 # Code Actions
 # ============================================================================
 

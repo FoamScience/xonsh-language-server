@@ -177,3 +177,31 @@ class PythonBackend(Protocol):
             The resolved inlay hint.
         """
         ...
+
+    async def get_workspace_symbols(
+        self,
+        query: str,
+    ) -> list[lsp.WorkspaceSymbol]:
+        """Search for symbols across the workspace.
+
+        Args:
+            query: The search query string.
+
+        Returns:
+            List of workspace symbols matching the query.
+        """
+        ...
+
+    async def resolve_workspace_symbol(
+        self,
+        symbol: lsp.WorkspaceSymbol,
+    ) -> lsp.WorkspaceSymbol:
+        """Resolve additional details for a workspace symbol.
+
+        Args:
+            symbol: The workspace symbol to resolve.
+
+        Returns:
+            The resolved workspace symbol.
+        """
+        ...
