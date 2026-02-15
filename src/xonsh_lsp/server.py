@@ -109,7 +109,7 @@ class XonshLanguageServer(LanguageServer):
 # Create server instance
 server = XonshLanguageServer(
     name="xonsh-lsp",
-    version="0.1.5",
+    version="0.1.7",
 )
 
 
@@ -656,7 +656,7 @@ def main() -> None:
     parser.add_argument(
         "--version",
         action="version",
-        version="xonsh-lsp 0.1.5",
+        version="xonsh-lsp 0.1.7",
     )
     parser.add_argument(
         "--python-backend",
