@@ -109,6 +109,32 @@ class TestLspProxyBackendNotStarted:
         assert result is None
 
     @pytest.mark.asyncio
+    async def test_get_inlay_hints_not_started_main(self, backend):
+        result = await backend.get_inlay_hints("x = 1", 0, 1)
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_symbols_not_started(self, backend):
+        result = await backend.get_workspace_symbols("foo")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_workspace_symbol_not_started(self, backend):
+        symbol = lsp.WorkspaceSymbol(
+            name="MyClass",
+            kind=lsp.SymbolKind.Class,
+            location=lsp.Location(
+                uri="file:///test/file.py",
+                range=lsp.Range(
+                    start=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=7),
+                ),
+            ),
+        )
+        result = await backend.resolve_workspace_symbol(symbol)
+        assert result is symbol
+
+    @pytest.mark.asyncio
     async def test_stop_not_started(self, backend):
         # Should not raise
         await backend.stop()
@@ -871,3 +897,203 @@ class TestLspProxyBackendInlayHintRefresh:
         """Refresh without server should not raise."""
         backend = LspProxyBackend(command=["test"])
         await backend._handle_inlay_hint_refresh()  # Should not raise
+
+
+class TestLspProxyBackendWorkspaceSymbolsNotStarted:
+    """Test workspace symbol methods when backend is not started."""
+
+    @pytest.fixture
+    def backend(self):
+        return LspProxyBackend(command=["pyright-langserver", "--stdio"])
+
+    @pytest.mark.asyncio
+    async def test_get_workspace_symbols_not_started(self, backend):
+        result = await backend.get_workspace_symbols("foo")
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_resolve_workspace_symbol_not_started(self, backend):
+        symbol = lsp.WorkspaceSymbol(
+            name="MyClass",
+            kind=lsp.SymbolKind.Class,
+            location=lsp.Location(
+                uri="file:///test/file.py",
+                range=lsp.Range(
+                    start=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=7),
+                ),
+            ),
+        )
+        result = await backend.resolve_workspace_symbol(symbol)
+        assert result is symbol
+
+
+class TestLspProxyBackendWorkspaceSymbols:
+    """Test workspace symbol passthrough with URI remapping."""
+
+    def _make_backend(self):
+        backend = LspProxyBackend(command=["test"])
+        backend._client = MagicMock()
+        backend._started = True
+        return backend
+
+    @pytest.mark.asyncio
+    async def test_pure_passthrough(self):
+        """Workspace symbols should pass through from child."""
+        backend = self._make_backend()
+        child_symbols = [
+            lsp.WorkspaceSymbol(
+                name="my_func",
+                kind=lsp.SymbolKind.Function,
+                location=lsp.Location(
+                    uri="file:///test/file.py",
+                    range=lsp.Range(
+                        start=lsp.Position(line=5, character=0),
+                        end=lsp.Position(line=5, character=7),
+                    ),
+                ),
+            ),
+        ]
+        backend._client.workspace_symbol_async = AsyncMock(return_value=child_symbols)
+
+        result = await backend.get_workspace_symbols("my_func")
+
+        assert len(result) == 1
+        assert result[0].name == "my_func"
+        assert result[0].kind == lsp.SymbolKind.Function
+        backend._client.workspace_symbol_async.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_uri_remapping(self):
+        """Child .py URIs should be remapped back to original .xsh URIs."""
+        backend = self._make_backend()
+
+        # Simulate a document sync that populates uri_map
+        py_uri = Path(_test_path("file.py")).as_uri()
+        xsh_uri = Path(_test_path("file.xsh")).as_uri()
+        backend._uri_map[py_uri] = xsh_uri
+
+        child_symbols = [
+            lsp.WorkspaceSymbol(
+                name="my_var",
+                kind=lsp.SymbolKind.Variable,
+                location=lsp.Location(
+                    uri=py_uri,
+                    range=lsp.Range(
+                        start=lsp.Position(line=0, character=0),
+                        end=lsp.Position(line=0, character=6),
+                    ),
+                ),
+            ),
+        ]
+        backend._client.workspace_symbol_async = AsyncMock(return_value=child_symbols)
+
+        result = await backend.get_workspace_symbols("my_var")
+
+        assert len(result) == 1
+        assert result[0].location.uri == xsh_uri
+
+    @pytest.mark.asyncio
+    async def test_none_result_returns_empty(self):
+        """None result from child should return empty list."""
+        backend = self._make_backend()
+        backend._client.workspace_symbol_async = AsyncMock(return_value=None)
+
+        result = await backend.get_workspace_symbols("anything")
+
+        assert result == []
+
+    @pytest.mark.asyncio
+    async def test_symbol_information_converted(self):
+        """SymbolInformation results should be converted to WorkspaceSymbol."""
+        backend = self._make_backend()
+
+        py_uri = Path(_test_path("file.py")).as_uri()
+        xsh_uri = Path(_test_path("file.xsh")).as_uri()
+        backend._uri_map[py_uri] = xsh_uri
+
+        child_results = [
+            lsp.SymbolInformation(
+                name="OldClass",
+                kind=lsp.SymbolKind.Class,
+                location=lsp.Location(
+                    uri=py_uri,
+                    range=lsp.Range(
+                        start=lsp.Position(line=10, character=0),
+                        end=lsp.Position(line=10, character=8),
+                    ),
+                ),
+                container_name="my_module",
+            ),
+        ]
+        backend._client.workspace_symbol_async = AsyncMock(return_value=child_results)
+
+        result = await backend.get_workspace_symbols("OldClass")
+
+        assert len(result) == 1
+        assert isinstance(result[0], lsp.WorkspaceSymbol)
+        assert result[0].name == "OldClass"
+        assert result[0].kind == lsp.SymbolKind.Class
+        assert result[0].location.uri == xsh_uri
+        assert result[0].container_name == "my_module"
+
+    @pytest.mark.asyncio
+    async def test_resolve_forwards_to_child(self):
+        """resolve_workspace_symbol should forward to child and remap URI."""
+        backend = self._make_backend()
+
+        py_uri = Path(_test_path("file.py")).as_uri()
+        xsh_uri = Path(_test_path("file.xsh")).as_uri()
+        backend._uri_map[py_uri] = xsh_uri
+
+        symbol = lsp.WorkspaceSymbol(
+            name="MyClass",
+            kind=lsp.SymbolKind.Class,
+            location=lsp.Location(
+                uri=xsh_uri,
+                range=lsp.Range(
+                    start=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=0),
+                ),
+            ),
+        )
+        resolved = lsp.WorkspaceSymbol(
+            name="MyClass",
+            kind=lsp.SymbolKind.Class,
+            location=lsp.Location(
+                uri=py_uri,
+                range=lsp.Range(
+                    start=lsp.Position(line=5, character=6),
+                    end=lsp.Position(line=5, character=13),
+                ),
+            ),
+        )
+        backend._client.workspace_symbol_resolve_async = AsyncMock(return_value=resolved)
+
+        result = await backend.resolve_workspace_symbol(symbol)
+
+        backend._client.workspace_symbol_resolve_async.assert_called_once_with(symbol)
+        assert result.location.uri == xsh_uri
+        assert result.location.range.start.line == 5
+
+    @pytest.mark.asyncio
+    async def test_resolve_no_remap_needed(self):
+        """resolve should work when no URI remapping is needed."""
+        backend = self._make_backend()
+
+        symbol = lsp.WorkspaceSymbol(
+            name="func",
+            kind=lsp.SymbolKind.Function,
+            location=lsp.Location(
+                uri="file:///test/plain.py",
+                range=lsp.Range(
+                    start=lsp.Position(line=0, character=0),
+                    end=lsp.Position(line=0, character=4),
+                ),
+            ),
+        )
+        backend._client.workspace_symbol_resolve_async = AsyncMock(return_value=symbol)
+
+        result = await backend.resolve_workspace_symbol(symbol)
+
+        assert result.location.uri == "file:///test/plain.py"
