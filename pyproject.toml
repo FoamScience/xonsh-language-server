@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xonsh-lsp"
-version = "0.1.5"
+version = "0.1.7"
 description = "Language Server Protocol implementation for xonsh"
 readme = "README.md"
 license = "MIT"
@@ -40,7 +40,7 @@ dependencies = [
     "pygls>=1.3.0",
     "lsprotocol>=2023.0.0",
     "tree-sitter>=0.25.2",
-    "tree-sitter-xonsh>=0.1.5",
+    "tree-sitter-xonsh>=0.1.7",
     "cattrs>=23.0.0",
 ]
 
