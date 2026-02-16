@@ -158,7 +158,7 @@ class LspProxyBackend:
         logger.info(f"PROXY: starting child: command={self._command}, workspace={workspace_root}")
 
         # Create and start the language client
-        self._client = LanguageClient("xonsh-lsp-proxy", "0.1.7")
+        self._client = LanguageClient("xonsh-lsp-proxy", "0.2.0")
         _patch_converter(self._client.protocol._converter)
 
         # Register diagnostics handler before starting
