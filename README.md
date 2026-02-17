@@ -92,21 +92,44 @@ xonsh-lsp --python-backend lsp-proxy --backend-command my-lsp-server --stdio
 
 ### Neovim Integration
 
-> Currently this LSP server is in beta stage; adding it to canonical Neovim echosystem tools is planned
-> but may take some time. For now, a manual approach is recomended
+> xonsh-lsp is not yet in the canonical nvim-lspconfig registry. For now, configure it
+> manually using Neovim's native LSP API (0.11+) or the nvim-lspconfig custom-server pattern.
 
-Add to your Neovim configuration (using `nvim-lspconfig`):
+#### 1. Register the xonsh filetype
+
+Place this somewhere early in your config (e.g. an `autocmds.lua` file):
+
+```lua
+vim.filetype.add({
+  extension = { xsh = 'xonsh', xonshrc = 'xonsh' },
+  filename  = { ['.xonshrc'] = 'xonsh', ['xonshrc'] = 'xonsh' },
+})
+```
+
+#### 2. Configure the language server
+
+**Neovim 0.11+ (native `vim.lsp`)**
+
+```lua
+vim.lsp.config('xonsh_lsp', {
+  cmd = { 'xonsh-lsp' },             -- or { 'uvx', '-n', 'xonsh-lsp' }
+  filetypes = { 'xonsh' },
+  root_markers = { '.xonshrc', 'xonshrc', '.git' },
+})
+vim.lsp.enable('xonsh_lsp')
+```
+
+**nvim-lspconfig (manual server registration)**
 
 ```lua
 local lspconfig = require('lspconfig')
 local configs = require('lspconfig.configs')
 
--- Register xonsh-lsp
 if not configs.xonsh_lsp then
   configs.xonsh_lsp = {
     default_config = {
-      cmd = { 'xonsh-lsp' }, -- <-- manage server installation manually
-      filetypes = { 'xonsh', 'xsh' },
+      cmd = { 'xonsh-lsp' },
+      filetypes = { 'xonsh' },
       root_dir = function(fname)
         return lspconfig.util.find_git_ancestor(fname) or vim.fn.getcwd()
       end,
@@ -115,35 +138,47 @@ if not configs.xonsh_lsp then
   }
 end
 
--- Set up the LSP
-lspconfig.xonsh_lsp.setup({
-  on_attach = function(client, bufnr) end,
-  capabilities = require('cmp_nvim_lsp').default_capabilities(),
-})
-
--- Associate file types
-vim.filetype.add({
-  extension = {
-    xsh = 'xonsh',
-    xonshrc = 'xonsh',
-  },
-  filename = {
-    ['.xonshrc'] = 'xonsh',
-  },
-})
+lspconfig.xonsh_lsp.setup({})
 ```
 
-#### Using Pyright as the Python backend
+#### 3. Choose a Python backend
+
+xonsh-lsp delegates Python analysis to an external backend. Set it via `init_options`:
+
+**ty (recommended — extremely fast, written in Rust)**
 
 ```lua
-lspconfig.xonsh_lsp.setup({
+vim.lsp.config('xonsh_lsp', {
+  cmd = { 'uvx', '-n', 'xonsh-lsp' },
+  filetypes = { 'xonsh' },
+  root_markers = { '.xonshrc', 'xonshrc', '.git' },
   init_options = {
-    pythonBackend = "pyright",
+    pythonBackend = 'ty',
+    -- Optional: pin the ty binary (e.g. from Mason)
+    -- pythonBackendCommand = { '/path/to/ty', 'server' },
   },
-  -- Your existing Pyright-style settings — forwarded transparently to the child backend
+  settings = {
+    environment = {
+      python = vim.fn.exepath('python3'),
+    },
+  },
+})
+vim.lsp.enable('xonsh_lsp')
+```
+
+**Pyright**
+
+```lua
+vim.lsp.config('xonsh_lsp', {
+  cmd = { 'uvx', '-n', 'xonsh-lsp' },
+  filetypes = { 'xonsh' },
+  root_markers = { '.xonshrc', 'xonshrc', '.git' },
+  init_options = {
+    pythonBackend = 'pyright',
+  },
   settings = {
     python = {
-      pythonPath = "/path/to/python",  -- or detected via your own on_attach
+      pythonPath = vim.fn.exepath('python3'),
       analysis = {
         autoSearchPaths = true,
         useLibraryCodeForTypes = true,
@@ -151,20 +186,78 @@ lspconfig.xonsh_lsp.setup({
     },
   },
 })
+vim.lsp.enable('xonsh_lsp')
 ```
 
-#### Using ty as the Python backend
+Your Python backend settings (e.g. `settings.python.*`, `settings.environment.*`) are
+forwarded transparently to the child LSP — xonsh-lsp does not detect or override paths itself.
+
+#### 4. (Optional) Tree-sitter highlighting
+
+For syntax highlighting, install the [tree-sitter-xonsh](https://github.com/FoamScience/tree-sitter-xonsh) parser:
 
 ```lua
-lspconfig.xonsh_lsp.setup({
-  init_options = {
-    pythonBackend = "ty",
-  },
+-- Register the parser so :TSInstall xonsh works
+vim.api.nvim_create_autocmd('User', {
+  pattern = 'TSUpdate',
+  callback = function()
+    require('nvim-treesitter.parsers').xonsh = {
+      install_info = {
+        url = 'https://github.com/FoamScience/tree-sitter-xonsh',
+        queries = 'queries/',
+      },
+    }
+  end,
+})
+
+-- Start treesitter highlighting for xonsh buffers
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'xonsh',
+  callback = function(args)
+    if not require('nvim-treesitter.parsers').xonsh then
+      vim.treesitter.start(args.buf, 'xonsh')
+    end
+  end,
 })
 ```
 
-Your existing Python backend configuration (e.g. `settings.python.*`) is forwarded
-transparently to the child LSP — xonsh-lsp does not try to detect or override paths itself.
+#### 5. (Optional) UV project Python detection
+
+If you use [uv](https://docs.astral.sh/uv/) for project management, you can
+auto-detect the correct Python interpreter and notify the backend via
+`workspace/didChangeConfiguration` in your `on_attach`:
+
+```lua
+vim.lsp.config('xonsh_lsp', {
+  cmd = { 'uvx', '-n', 'xonsh-lsp' },
+  filetypes = { 'xonsh' },
+  root_markers = { '.xonshrc', 'xonshrc', '.git' },
+  init_options = { pythonBackend = 'ty' },
+  settings = {
+    environment = { python = vim.fn.exepath('python3') },
+  },
+  on_attach = function(client, bufnr)
+    local filepath = vim.api.nvim_buf_get_name(bufnr)
+    local dir = vim.fn.fnamemodify(filepath, ':h')
+    vim.system(
+      { 'uv', 'python', 'find' },
+      { text = true, timeout = 1000, cwd = dir },
+      vim.schedule_wrap(function(result)
+        if not result or not result.stdout then return end
+        local py = result.stdout:match('^%s*(.-)%s*$')
+        if py == '' or vim.fn.executable(py) ~= 1 then return end
+        client.settings = vim.tbl_deep_extend('force', client.settings or {}, {
+          environment = { python = py },
+        })
+        client:notify('workspace/didChangeConfiguration', {
+          settings = client.settings,
+        })
+      end)
+    )
+  end,
+})
+vim.lsp.enable('xonsh_lsp')
+```
 
 ## Configuration
 
