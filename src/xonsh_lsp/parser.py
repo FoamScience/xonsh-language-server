@@ -127,6 +127,16 @@ class XonshParser:
             self._parser = None
             self._language = None
 
+    @staticmethod
+    def _node_text(node: Node) -> str:
+        """Extract text from a tree-sitter node.
+
+        Uses ``node.text`` (bytes) instead of slicing the source string with
+        byte offsets, which breaks when the source contains multi-byte UTF-8
+        characters (emoji, accented letters, etc.).
+        """
+        return node.text.decode("utf-8") if node.text else ""
+
     def parse(self, source: str) -> ParseResult:
         """Parse xonsh source code."""
         if not TREE_SITTER_AVAILABLE or self._parser is None:
@@ -237,7 +247,7 @@ class XonshParser:
         """Convert a tree-sitter node to NodeInfo."""
         return NodeInfo(
             type=node.type,
-            text=source[node.start_byte : node.end_byte],
+            text=self._node_text(node),
             start_point=(node.start_point[0], node.start_point[1]),
             end_point=(node.end_point[0], node.end_point[1]),
             start_byte=node.start_byte,
@@ -310,10 +320,10 @@ class XonshParser:
         # Walk up to find identifier or env variable
         while node is not None:
             if node.type == "identifier":
-                return source[node.start_byte : node.end_byte]
+                return self._node_text(node)
             elif node.type in self.ENV_VAR_TYPES:
                 # Extract variable name from env variable
-                text = source[node.start_byte : node.end_byte]
+                text = self._node_text(node)
                 if text.startswith("${") and text.endswith("}"):
                     return text[2:-1]
                 elif text.startswith("$"):
@@ -494,7 +504,7 @@ class XonshParser:
                 name_node = node.child_by_field_name("name")
                 if name_node:
                     symbols.append({
-                        "name": source[name_node.start_byte:name_node.end_byte],
+                        "name": self._node_text(name_node),
                         "kind": "function",
                         "line": node.start_point[0],
                         "col": node.start_point[1],
@@ -508,7 +518,7 @@ class XonshParser:
                 name_node = node.child_by_field_name("name")
                 if name_node:
                     symbols.append({
-                        "name": source[name_node.start_byte:name_node.end_byte],
+                        "name": self._node_text(name_node),
                         "kind": "class",
                         "line": node.start_point[0],
                         "col": node.start_point[1],
@@ -521,12 +531,12 @@ class XonshParser:
             elif node.type == "assignment":
                 left = node.child_by_field_name("left")
                 if left and left.type == "identifier":
-                    name = source[left.start_byte:left.end_byte]
+                    name = self._node_text(left)
                     # Get right side for detail
                     right = node.child_by_field_name("right")
                     detail = ""
                     if right:
-                        right_text = source[right.start_byte:right.end_byte]
+                        right_text = self._node_text(right)
                         # Truncate long values
                         if len(right_text) > 30:
                             right_text = right_text[:27] + "..."
@@ -545,7 +555,7 @@ class XonshParser:
             elif node.type == "import_statement":
                 for child in node.children:
                     if child.type == "dotted_name":
-                        name = source[child.start_byte:child.end_byte]
+                        name = self._node_text(child)
                         symbols.append({
                             "name": name,
                             "kind": "module",
@@ -561,7 +571,7 @@ class XonshParser:
                 # Get imported names
                 for child in node.children:
                     if child.type == "dotted_name":
-                        name = source[child.start_byte:child.end_byte]
+                        name = self._node_text(child)
                         symbols.append({
                             "name": name,
                             "kind": "module",
@@ -576,11 +586,11 @@ class XonshParser:
             elif node.type == "env_assignment":
                 left = node.child_by_field_name("left")
                 if left:
-                    name = source[left.start_byte:left.end_byte]
+                    name = self._node_text(left)
                     right = node.child_by_field_name("right")
                     detail = ""
                     if right:
-                        right_text = source[right.start_byte:right.end_byte]
+                        right_text = self._node_text(right)
                         if len(right_text) > 30:
                             right_text = right_text[:27] + "..."
                         detail = right_text
@@ -598,7 +608,7 @@ class XonshParser:
             elif node.type == "xontrib_statement":
                 for child in node.children:
                     if child.type == "xontrib_name":
-                        name = source[child.start_byte:child.end_byte]
+                        name = self._node_text(child)
                         symbols.append({
                             "name": f"xontrib:{name}",
                             "kind": "module",
@@ -613,11 +623,11 @@ class XonshParser:
             elif node.type == "macro_call":
                 name_node = node.child_by_field_name("name")
                 if name_node:
-                    name = source[name_node.start_byte:name_node.end_byte]
+                    name = self._node_text(name_node)
                     arg_node = node.child_by_field_name("argument")
                     detail = ""
                     if arg_node:
-                        arg_text = source[arg_node.start_byte:arg_node.end_byte]
+                        arg_text = self._node_text(arg_node)
                         if len(arg_text) > 30:
                             arg_text = arg_text[:27] + "..."
                         detail = f"!({arg_text})"
