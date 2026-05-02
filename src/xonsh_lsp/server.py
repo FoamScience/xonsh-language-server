@@ -7,6 +7,7 @@ Main LSP server implementation using pygls.
 from __future__ import annotations
 
 import argparse
+import keyword
 import logging
 import os
 from typing import TYPE_CHECKING, Any, NamedTuple
@@ -121,6 +122,78 @@ server = XonshLanguageServer(
     name="xonsh-lsp",
     version=_xonsh_lsp_version,
 )
+
+
+def _is_python_identifier(value: str) -> bool:
+    return value.isidentifier() and not keyword.iskeyword(value)
+
+
+def _python_identifier_range_at_position(
+    source: str,
+    line: int,
+    character: int,
+) -> lsp.Range | None:
+    lines = source.splitlines()
+    if line < 0 or line >= len(lines):
+        return None
+
+    line_text = lines[line]
+    if not line_text:
+        return None
+
+    if character < len(line_text) and (
+        line_text[character].isalnum() or line_text[character] == "_"
+    ):
+        index = character
+    elif character > 0 and (line_text[character - 1].isalnum() or line_text[character - 1] == "_"):
+        index = character - 1
+    else:
+        return None
+
+    start = index
+    while start > 0 and (line_text[start - 1].isalnum() or line_text[start - 1] == "_"):
+        start -= 1
+
+    end = index + 1
+    while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == "_"):
+        end += 1
+
+    identifier = line_text[start:end]
+    if not _is_python_identifier(identifier):
+        return None
+    if start > 0 and line_text[start - 1] == "$":
+        return None
+    if start >= 2 and line_text[start - 2:start] == "${":
+        return None
+
+    return lsp.Range(
+        start=lsp.Position(line=line, character=start),
+        end=lsp.Position(line=line, character=end),
+    )
+
+
+def _range_key(range_: lsp.Range) -> tuple[int, int, int, int]:
+    return (
+        range_.start.line,
+        range_.start.character,
+        range_.end.line,
+        range_.end.character,
+    )
+
+
+def _source_text_for_range(source: str, range_: lsp.Range) -> str | None:
+    if range_.start.line != range_.end.line:
+        return None
+
+    lines = source.splitlines()
+    if range_.start.line < 0 or range_.start.line >= len(lines):
+        return None
+
+    line = lines[range_.start.line]
+    if range_.start.character < 0 or range_.end.character > len(line):
+        return None
+
+    return line[range_.start.character:range_.end.character]
 
 
 def _create_backend(
@@ -424,6 +497,63 @@ async def references(params: lsp.ReferenceParams) -> list[lsp.Location] | None:
             unique_refs.append(ref)
 
     return unique_refs if unique_refs else None
+
+
+# ============================================================================
+# Rename
+# ============================================================================
+
+
+@server.feature(lsp.TEXT_DOCUMENT_RENAME, lsp.RenameOptions(prepare_provider=False))
+async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
+    """Rename Python identifiers."""
+    uri = params.text_document.uri
+    doc = server.get_document(uri)
+    if doc is None:
+        return None
+
+    if not _is_python_identifier(params.new_name):
+        return None
+
+    target_range = _python_identifier_range_at_position(
+        doc.source,
+        params.position.line,
+        params.position.character,
+    )
+    if target_range is None:
+        return None
+
+    old_name = _source_text_for_range(doc.source, target_range)
+    if old_name is None:
+        return None
+
+    refs = await server.python_delegate.get_references(
+        doc.source,
+        params.position.line,
+        params.position.character,
+        doc.path,
+    )
+
+    edits: list[lsp.TextEdit] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    for ref in refs:
+        if ref.uri != uri:
+            continue
+
+        key = _range_key(ref.range)
+        if key in seen:
+            continue
+
+        if _source_text_for_range(doc.source, ref.range) != old_name:
+            continue
+
+        seen.add(key)
+        edits.append(lsp.TextEdit(range=ref.range, new_text=params.new_name))
+
+    if not edits:
+        return None
+
+    return lsp.WorkspaceEdit(changes={uri: edits})
 
 
 # ============================================================================
