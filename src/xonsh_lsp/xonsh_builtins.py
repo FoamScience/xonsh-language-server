@@ -544,27 +544,29 @@ XONSH_GLOB_PATTERNS = {
     },
 }
 
-# Xonsh @ object attributes
+# Documented attributes of xonsh's `XonshSessionInterface` (accessed via `@.<name>`).
+# `@.<name>` desugars to `__xonsh__.interface.<name>` in xonsh >= 0.18.2.
+# See xonsh/built_ins.py (XonshSessionInterface) and xonsh/parsers/base.py.
 XONSH_AT_OBJECTS = {
     "env": {
-        "doc": "Environment dictionary. Access environment variables as attributes.",
-        "example": "@.env.HOME",
+        "doc": "Xonsh environment object (`Env`). Use bracket access: `@.env['HOME']`.",
+        "example": "@.env['HOME']",
     },
     "imp": {
-        "doc": "Import helper. Import modules as attributes without import statement.",
+        "doc": "Inline lazy importer. Use as `@.imp.<module>` without an import statement.",
         "example": "@.imp.json.loads(data)",
     },
     "lastcmd": {
-        "doc": "Last executed command result.",
+        "doc": "Result of the last executed command (a `CommandPipeline`).",
         "example": "@.lastcmd.returncode",
     },
-    "aliases": {
-        "doc": "Aliases dictionary. Access command aliases.",
-        "example": "@.aliases.ll",
+    "history": {
+        "doc": "Xonsh command history.",
+        "example": "@.history[-1]",
     },
-    "builtins": {
-        "doc": "Xonsh builtins namespace.",
-        "example": "@.builtins.source",
+    "debug": {
+        "doc": "Xonsh debug helpers (e.g. `@.debug.breakpoint()`).",
+        "example": "@.debug.breakpoint()",
     },
 }
 
