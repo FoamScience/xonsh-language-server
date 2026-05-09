@@ -38,84 +38,53 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Semantic token indices — must match SEMANTIC_TOKENS_LEGEND in server.py
-# ---------------------------------------------------------------------------
+# Tree-sitter highlights.scm capture → LSP semantic token, ordered by descending
+# priority. When multiple captures match the same node, the first listed wins.
+# Indices must match SEMANTIC_TOKENS_LEGEND in server.py (both derive from
+# lsprotocol's enum order).
 _TYPE_INDEX: dict[str, int] = {t.value: i for i, t in enumerate(lsp.SemanticTokenTypes)}
 _MOD_INDEX: dict[str, int] = {m.value: i for i, m in enumerate(lsp.SemanticTokenModifiers)}
 
 
 def _mod_bits(*names: str) -> int:
-    return sum(1 << _MOD_INDEX[n] for n in names if n in _MOD_INDEX)
+    return sum(1 << _MOD_INDEX[n] for n in names)
 
 
-# capture_name → (type_index, modifier_bits)
-_CAPTURE_TOKEN: dict[str, tuple[int, int]] = {
-    k: (_TYPE_INDEX[t], _mod_bits(*mods))
-    for k, t, mods in [
-        ("comment",                "comment",   []),
-        ("string",                 "string",    []),
-        ("string.escape",          "string",    []),
-        ("string.special",         "string",    []),
-        ("string.special.path",    "string",    []),
-        ("string.special.symbol",  "string",    []),
-        ("string.regexp",          "regexp",    []),
-        ("number",                 "number",    []),
-        ("number.float",           "number",    []),
-        ("keyword",                "keyword",   []),
-        ("keyword.import",         "keyword",   []),
-        ("keyword.exception",      "keyword",   []),
-        ("keyword.operator",       "keyword",   []),
-        ("operator",               "operator",  []),
-        ("variable",               "variable",  []),
-        ("variable.builtin",       "variable",  ["defaultLibrary"]),
-        ("variable.parameter",     "parameter", []),
-        ("function",               "function",  []),
-        ("function.call",          "function",  []),
-        ("function.builtin",       "function",  ["defaultLibrary"]),
-        ("function.method.call",   "method",    []),
-        ("type",                   "type",      []),
-        ("module",                 "namespace", []),
-        ("property",               "property",  []),
-        ("attribute",              "decorator", []),
-        ("boolean",                "keyword",   ["readonly"]),
-        ("constant.builtin",       "variable",  ["readonly", "defaultLibrary"]),
-    ]
+_CAPTURES_ORDERED: list[tuple[str, str, tuple[str, ...]]] = [
+    ("function.builtin",      "function",  ("defaultLibrary",)),
+    ("function.method.call",  "method",    ()),
+    ("variable.parameter",    "parameter", ()),  # flags (^-) beat function.call
+    ("function.call",         "function",  ()),
+    ("function",              "function",  ()),
+    ("type",                  "type",      ()),
+    ("module",                "namespace", ()),
+    ("property",              "property",  ()),
+    ("variable.builtin",      "variable",  ("defaultLibrary",)),
+    ("constant.builtin",      "variable",  ("readonly", "defaultLibrary")),
+    ("boolean",               "keyword",   ("readonly",)),
+    ("keyword.exception",     "keyword",   ()),
+    ("keyword.import",        "keyword",   ()),
+    ("keyword.operator",      "keyword",   ()),
+    ("keyword",               "keyword",   ()),
+    ("operator",              "operator",  ()),
+    ("string.regexp",         "regexp",    ()),
+    ("string.special.path",   "string",    ()),
+    ("string.special.symbol", "string",    ()),
+    ("string.special",        "string",    ()),
+    ("string.escape",         "string",    ()),
+    ("string",                "string",    ()),
+    ("number.float",          "number",    ()),
+    ("number",                "number",    ()),
+    ("comment",               "comment",   ()),
+    ("attribute",             "decorator", ()),
+    ("variable",              "variable",  ()),
+]
+
+# capture_name → (priority, type_index, modifier_bits)
+_CAPTURE_INFO: dict[str, tuple[int, int, int]] = {
+    name: (i, _TYPE_INDEX[t], _mod_bits(*mods))
+    for i, (name, t, mods) in enumerate(_CAPTURES_ORDERED)
     if t in _TYPE_INDEX
-}
-
-# When multiple captures match the same node, lower index wins
-_CAPTURE_PRIORITY: dict[str, int] = {
-    name: i for i, name in enumerate([
-        "function.builtin",
-        "function.method.call",
-        "variable.parameter",   # flags (^-) beat generic function.call
-        "function.call",
-        "function",
-        "type",
-        "module",
-        "property",
-        "variable.builtin",
-        "constant.builtin",
-        "boolean",
-        "keyword.exception",
-        "keyword.import",
-        "keyword.operator",
-        "keyword",
-        "operator",
-        "string.regexp",
-        "string.special.path",
-        "string.special.symbol",
-        "string.special",
-        "string.escape",
-        "string",
-        "number.float",
-        "number",
-        "comment",
-        "attribute",
-        "decorator",
-        "variable",
-    ])
 }
 
 
@@ -250,45 +219,42 @@ class XonshParser:
             cursor.set_point_range((start_line, 0), (end_line + 1, 0))
         captures: dict[str, list[Node]] = cursor.captures(result.tree.root_node)
 
-        # Group relevant capture names by (start_byte, end_byte)
-        range_captures: dict[tuple[int, int], list[str]] = {}
-        range_node: dict[tuple[int, int], Node] = {}
+        # For each node range, keep the highest-priority capture only.
+        best_per_range: dict[tuple[int, int], tuple[int, Node, int, int]] = {}
         for capture_name, nodes in captures.items():
-            if capture_name not in _CAPTURE_PRIORITY:
+            info = _CAPTURE_INFO.get(capture_name)
+            if info is None:
                 continue
+            priority, type_idx, mod_bits = info
             for node in nodes:
                 key = (node.start_byte, node.end_byte)
-                range_captures.setdefault(key, []).append(capture_name)
-                range_node.setdefault(key, node)
+                existing = best_per_range.get(key)
+                if existing is None or priority < existing[0]:
+                    best_per_range[key] = (priority, node, type_idx, mod_bits)
 
-        # Build sorted token list
-        raw: list[tuple[int, int, int, int, int]] = []
-        for key, names in range_captures.items():
-            best: str = min(names, key=lambda n: _CAPTURE_PRIORITY.get(n, 999))
-            type_idx, mod_bits = _CAPTURE_TOKEN[best]
-            node = range_node[key]
+        tokens: list[tuple[int, int, int, int, int]] = []
+        for _, node, type_idx, mod_bits in best_per_range.values():
             row, col = node.start_point
             end_row, end_col = node.end_point
             if row != end_row:
-                continue  # skip multi-line nodes
+                continue
             length = end_col - col
             if length <= 0:
                 continue
-            raw.append((row, col, length, type_idx, mod_bits))
+            tokens.append((row, col, length, type_idx, mod_bits))
 
-        raw.sort(key=lambda t: (t[0], t[1]))
+        tokens.sort(key=lambda t: (t[0], t[1]))
 
-        # Remove tokens whose range is contained within the previous token
-        # (e.g. string_content inside string — keep the outer one)
+        # Drop tokens nested inside the previous one (e.g. string_content inside
+        # string — highlights.scm captures both, but we want a single outer span).
         deduped: list[tuple[int, int, int, int, int]] = []
-        for tok in raw:
+        for tok in tokens:
             if deduped:
                 prev = deduped[-1]
                 if tok[0] == prev[0] and tok[1] < prev[1] + prev[2]:
                     continue
             deduped.append(tok)
 
-        # Delta-encode
         data: list[int] = []
         prev_line = prev_col = 0
         for line, col, length, type_idx, mod_bits in deduped:
