@@ -9,7 +9,7 @@ import xonsh_lsp.server as server_module
 
 @pytest.fixture
 def document():
-    return SimpleNamespace(source="MyClass()\nls -la\n", path="/test/file.xsh")
+    return SimpleNamespace(source="MyClass()\nls -la\n", path="/test/file.xsh", version=1)
 
 
 @pytest.fixture
@@ -36,7 +36,7 @@ async def test_semantic_tokens_full_uses_python_backend(
     monkeypatch.setattr(
         server_module.server.parser,
         "get_semantic_tokens",
-        lambda source: None,
+        lambda *args, **kwargs: None,
         raising=False,
     )
 
@@ -60,7 +60,7 @@ async def test_semantic_tokens_merge_backend_over_parser_overlap(monkeypatch, do
     monkeypatch.setattr(
         server_module.server.parser,
         "get_semantic_tokens",
-        lambda source: lsp.SemanticTokens(data=[0, 0, 7, 8, 0, 1, 0, 2, 12, 0]),
+        lambda *args, **kwargs: lsp.SemanticTokens(data=[0, 0, 7, 8, 0, 1, 0, 2, 12, 0]),
     )
 
     # When
@@ -87,7 +87,7 @@ async def test_semantic_tokens_full_uses_parser_tokens_when_backend_has_no_token
     monkeypatch.setattr(
         server_module.server.parser,
         "get_semantic_tokens",
-        lambda source: lsp.SemanticTokens(data=[1, 0, 2, 12, 0]),
+        lambda *args, **kwargs: lsp.SemanticTokens(data=[1, 0, 2, 12, 0]),
     )
 
     # When
@@ -114,7 +114,7 @@ async def test_semantic_tokens_range_uses_python_backend(
     monkeypatch.setattr(
         server_module.server.parser,
         "get_semantic_tokens",
-        lambda source, start_line=None, end_line=None: None,
+        lambda *args, **kwargs: None,
         raising=False,
     )
     range_ = lsp.Range(

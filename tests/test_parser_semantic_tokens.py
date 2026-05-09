@@ -33,6 +33,20 @@ def tokens_of_type(decoded: list[dict], token_type: str) -> list[dict]:
     return [t for t in decoded if t["type"] == token_type]
 
 
+def tokens(
+    parser: XonshParser, source: str, start_line: int | None = None, end_line: int | None = None,
+) -> lsp.SemanticTokens | None:
+    range_ = (
+        lsp.Range(
+            start=lsp.Position(line=start_line, character=0),
+            end=lsp.Position(line=end_line, character=0),
+        )
+        if start_line is not None and end_line is not None
+        else None
+    )
+    return parser.get_semantic_tokens(parser.parse(source), range_)
+
+
 class TestParserSemanticTokens:
 
     @pytest.fixture
@@ -40,7 +54,7 @@ class TestParserSemanticTokens:
         return XonshParser()
 
     def test_empty_source(self, parser):
-        result = parser.get_semantic_tokens("")
+        result = tokens(parser, "")
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         assert result.data == []
@@ -48,10 +62,10 @@ class TestParserSemanticTokens:
     def test_returns_none_without_tree_sitter(self):
         p = XonshParser()
         p._initialized = False
-        assert p.get_semantic_tokens("x = 1") is None
+        assert p.get_semantic_tokens(None) is None
 
     def test_python_keyword(self, parser):
-        result = parser.get_semantic_tokens("def foo(): pass")
+        result = tokens(parser, "def foo(): pass")
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, "def foo(): pass")
@@ -60,7 +74,7 @@ class TestParserSemanticTokens:
         assert "pass" in keywords
 
     def test_function_definition(self, parser):
-        result = parser.get_semantic_tokens("def greet(name): pass")
+        result = tokens(parser, "def greet(name): pass")
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, "def greet(name): pass")
@@ -69,7 +83,7 @@ class TestParserSemanticTokens:
 
     def test_import(self, parser):
         source = "import os"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -78,7 +92,7 @@ class TestParserSemanticTokens:
 
     def test_string_no_duplicates(self, parser):
         source = "x = 'hello'"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -89,7 +103,7 @@ class TestParserSemanticTokens:
 
     def test_number(self, parser):
         source = "x = 42"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -97,7 +111,7 @@ class TestParserSemanticTokens:
 
     def test_operator(self, parser):
         source = "x = 1 + 2"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -107,7 +121,7 @@ class TestParserSemanticTokens:
 
     def test_env_variable(self, parser):
         source = "$HOME"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -117,7 +131,7 @@ class TestParserSemanticTokens:
 
     def test_subprocess_command(self, parser):
         source = "ls -la"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -125,7 +139,7 @@ class TestParserSemanticTokens:
 
     def test_subprocess_flag_is_parameter(self, parser):
         source = "ls -la"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -133,7 +147,7 @@ class TestParserSemanticTokens:
 
     def test_tokens_sorted_by_position(self, parser):
         source = "import os\nx = 1\n"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -142,7 +156,7 @@ class TestParserSemanticTokens:
 
     def test_no_overlapping_tokens(self, parser):
         source = "x = 'hello world'\n"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)
@@ -155,8 +169,8 @@ class TestParserSemanticTokens:
 
     def test_range_subset(self, parser):
         source = "import os\nx = 1\nls -la\n"
-        full = parser.get_semantic_tokens(source)
-        ranged = parser.get_semantic_tokens(source, start_line=1, end_line=1)
+        full = tokens(parser, source)
+        ranged = tokens(parser, source, start_line=1, end_line=1)
         if full is None or ranged is None:
             pytest.skip("tree-sitter-xonsh not available")
         full_decoded = decode_tokens(full, source)
@@ -168,7 +182,7 @@ class TestParserSemanticTokens:
 
     def test_builtin_function_has_default_library_modifier(self, parser):
         source = "print('hi')"
-        result = parser.get_semantic_tokens(source)
+        result = tokens(parser, source)
         if result is None:
             pytest.skip("tree-sitter-xonsh not available")
         decoded = decode_tokens(result, source)

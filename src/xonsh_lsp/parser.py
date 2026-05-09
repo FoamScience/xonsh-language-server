@@ -201,23 +201,19 @@ class XonshParser:
 
     def get_semantic_tokens(
         self,
-        source: str,
-        start_line: int | None = None,
-        end_line: int | None = None,
+        parse_result: ParseResult | None,
+        range: lsp.Range | None = None,
     ) -> lsp.SemanticTokens | None:
-        if not self._initialized:
+        if not self._initialized or parse_result is None or parse_result.tree is None:
             return None
-        result = self.parse(source)
-        if result.tree is None:
-            return None
+
         query = self._get_highlights_query()
         if query is None:
             return None
-
         cursor = QueryCursor(query)
-        if start_line is not None and end_line is not None:
-            cursor.set_point_range((start_line, 0), (end_line + 1, 0))
-        captures: dict[str, list[Node]] = cursor.captures(result.tree.root_node)
+        if range is not None:
+            cursor.set_point_range((range.start.line, 0), (range.end.line + 1, 0))
+        captures: dict[str, list[Node]] = cursor.captures(parse_result.tree.root_node)
 
         # For each node range, keep the highest-priority capture only.
         best_per_range: dict[tuple[int, int], tuple[int, Node, int, int]] = {}
