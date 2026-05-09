@@ -546,6 +546,63 @@ SEMANTIC_TOKENS_LEGEND = lsp.SemanticTokensLegend(
 )
 
 
+_SemanticToken = tuple[int, int, int, int, int]
+
+
+def _decode_semantic_tokens(tokens: lsp.SemanticTokens | None) -> list[_SemanticToken]:
+    if tokens is None:
+        return []
+
+    result: list[_SemanticToken] = []
+    line = col = 0
+    data = tokens.data
+    for i in range(0, len(data), 5):
+        delta_line, delta_col, length, token_type, modifiers = data[i:i + 5]
+        line += delta_line
+        col = delta_col if delta_line else col + delta_col
+        result.append((line, col, length, token_type, modifiers))
+    return result
+
+
+def _encode_semantic_tokens(tokens: list[_SemanticToken]) -> lsp.SemanticTokens:
+    data: list[int] = []
+    prev_line = prev_col = 0
+    for line, col, length, token_type, modifiers in sorted(tokens, key=lambda t: (t[0], t[1])):
+        delta_line = line - prev_line
+        delta_col = col if delta_line else col - prev_col
+        data.extend([delta_line, delta_col, length, token_type, modifiers])
+        prev_line, prev_col = line, col
+    return lsp.SemanticTokens(data=data)
+
+
+def _tokens_overlap(a: _SemanticToken, b: _SemanticToken) -> bool:
+    if a[0] != b[0]:
+        return False
+    return a[1] < b[1] + b[2] and b[1] < a[1] + a[2]
+
+
+def _merge_semantic_tokens(
+    parser_tokens: lsp.SemanticTokens | None,
+    backend_tokens: lsp.SemanticTokens | None,
+) -> lsp.SemanticTokens | None:
+    if parser_tokens is None:
+        return backend_tokens
+    if backend_tokens is None:
+        return parser_tokens
+
+    parser_abs = _decode_semantic_tokens(parser_tokens)
+    backend_abs = _decode_semantic_tokens(backend_tokens)
+
+    if not parser_abs:
+        return backend_tokens
+    if not backend_abs:
+        return parser_tokens
+
+    merged = [tok for tok in parser_abs if not any(_tokens_overlap(tok, b) for b in backend_abs)]
+    merged.extend(backend_abs)
+    return _encode_semantic_tokens(merged)
+
+
 @server.feature(
     lsp.TEXT_DOCUMENT_SEMANTIC_TOKENS_FULL,
     SEMANTIC_TOKENS_LEGEND,
@@ -559,7 +616,9 @@ async def semantic_tokens_full(
     if doc is None:
         return None
 
-    return server.parser.get_semantic_tokens(doc.source)
+    parser_tokens = server.parser.get_semantic_tokens(doc.source)
+    backend_tokens = await server.python_delegate.get_semantic_tokens(doc.source, doc.path)
+    return _merge_semantic_tokens(parser_tokens, backend_tokens)
 
 
 @server.feature(lsp.TEXT_DOCUMENT_SEMANTIC_TOKENS_RANGE)
@@ -572,11 +631,20 @@ async def semantic_tokens_range(
     if doc is None:
         return None
 
-    return server.parser.get_semantic_tokens(
+    parser_tokens = server.parser.get_semantic_tokens(
         doc.source,
         start_line=params.range.start.line,
         end_line=params.range.end.line,
     )
+    backend_tokens = await server.python_delegate.get_semantic_tokens_range(
+        doc.source,
+        params.range.start.line,
+        params.range.start.character,
+        params.range.end.line,
+        params.range.end.character,
+        doc.path,
+    )
+    return _merge_semantic_tokens(parser_tokens, backend_tokens)
 
 
 # ============================================================================
