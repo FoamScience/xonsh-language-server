@@ -8,11 +8,14 @@ Falls back to basic parsing if xonsh grammar is not available.
 from __future__ import annotations
 
 import logging
+import pathlib
 from dataclasses import dataclass
 from typing import Iterator
 
+from lsprotocol import types as lsp
+
 try:
-    from tree_sitter import Language, Parser, Node, Tree
+    from tree_sitter import Language, Parser, Node, Tree, Query, QueryCursor
 
     TREE_SITTER_AVAILABLE = True
 except ImportError:
@@ -21,6 +24,8 @@ except ImportError:
     Tree = object  # type: ignore
     Language = object  # type: ignore
     Parser = object  # type: ignore
+    Query = object  # type: ignore
+    QueryCursor = object  # type: ignore
 
 try:
     import tree_sitter_xonsh
@@ -31,6 +36,87 @@ except ImportError:
     tree_sitter_xonsh = None  # type: ignore
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Semantic token indices — must match SEMANTIC_TOKENS_LEGEND in server.py
+# ---------------------------------------------------------------------------
+_TYPE_INDEX: dict[str, int] = {t.value: i for i, t in enumerate(lsp.SemanticTokenTypes)}
+_MOD_INDEX: dict[str, int] = {m.value: i for i, m in enumerate(lsp.SemanticTokenModifiers)}
+
+
+def _mod_bits(*names: str) -> int:
+    return sum(1 << _MOD_INDEX[n] for n in names if n in _MOD_INDEX)
+
+
+# capture_name → (type_index, modifier_bits)
+_CAPTURE_TOKEN: dict[str, tuple[int, int]] = {
+    k: (_TYPE_INDEX[t], _mod_bits(*mods))
+    for k, t, mods in [
+        ("comment",                "comment",   []),
+        ("string",                 "string",    []),
+        ("string.escape",          "string",    []),
+        ("string.special",         "string",    []),
+        ("string.special.path",    "string",    []),
+        ("string.special.symbol",  "string",    []),
+        ("string.regexp",          "regexp",    []),
+        ("number",                 "number",    []),
+        ("number.float",           "number",    []),
+        ("keyword",                "keyword",   []),
+        ("keyword.import",         "keyword",   []),
+        ("keyword.exception",      "keyword",   []),
+        ("keyword.operator",       "keyword",   []),
+        ("operator",               "operator",  []),
+        ("variable",               "variable",  []),
+        ("variable.builtin",       "variable",  ["defaultLibrary"]),
+        ("variable.parameter",     "parameter", []),
+        ("function",               "function",  []),
+        ("function.call",          "function",  []),
+        ("function.builtin",       "function",  ["defaultLibrary"]),
+        ("function.method.call",   "method",    []),
+        ("type",                   "type",      []),
+        ("module",                 "namespace", []),
+        ("property",               "property",  []),
+        ("attribute",              "decorator", []),
+        ("boolean",                "keyword",   ["readonly"]),
+        ("constant.builtin",       "variable",  ["readonly", "defaultLibrary"]),
+    ]
+    if t in _TYPE_INDEX
+}
+
+# When multiple captures match the same node, lower index wins
+_CAPTURE_PRIORITY: dict[str, int] = {
+    name: i for i, name in enumerate([
+        "function.builtin",
+        "function.method.call",
+        "variable.parameter",   # flags (^-) beat generic function.call
+        "function.call",
+        "function",
+        "type",
+        "module",
+        "property",
+        "variable.builtin",
+        "constant.builtin",
+        "boolean",
+        "keyword.exception",
+        "keyword.import",
+        "keyword.operator",
+        "keyword",
+        "operator",
+        "string.regexp",
+        "string.special.path",
+        "string.special.symbol",
+        "string.special",
+        "string.escape",
+        "string",
+        "number.float",
+        "number",
+        "comment",
+        "attribute",
+        "decorator",
+        "variable",
+    ])
+}
 
 
 @dataclass
@@ -97,6 +183,7 @@ class XonshParser:
         self._parser: Parser | None = None
         self._language: Language | None = None
         self._initialized = False
+        self._highlights_query: Query | None = None
 
         if TREE_SITTER_AVAILABLE:
             self._init_parser()
@@ -126,6 +213,91 @@ class XonshParser:
             logger.error(f"Failed to initialize parser: {e}")
             self._parser = None
             self._language = None
+
+    def _get_highlights_query(self) -> Query | None:
+        if self._highlights_query is not None:
+            return self._highlights_query
+        if self._language is None or not XONSH_GRAMMAR_AVAILABLE:
+            return None
+        try:
+            scm = (
+                pathlib.Path(tree_sitter_xonsh.__file__).parent
+                / "queries"
+                / "highlights.scm"
+            ).read_text()
+            self._highlights_query = Query(self._language, scm)
+        except Exception as e:
+            logger.warning(f"Failed to load highlights query: {e}")
+        return self._highlights_query
+
+    def get_semantic_tokens(
+        self,
+        source: str,
+        start_line: int | None = None,
+        end_line: int | None = None,
+    ) -> lsp.SemanticTokens | None:
+        if not self._initialized:
+            return None
+        result = self.parse(source)
+        if result.tree is None:
+            return None
+        query = self._get_highlights_query()
+        if query is None:
+            return None
+
+        cursor = QueryCursor(query)
+        if start_line is not None and end_line is not None:
+            cursor.set_point_range((start_line, 0), (end_line + 1, 0))
+        captures: dict[str, list[Node]] = cursor.captures(result.tree.root_node)
+
+        # Group relevant capture names by (start_byte, end_byte)
+        range_captures: dict[tuple[int, int], list[str]] = {}
+        range_node: dict[tuple[int, int], Node] = {}
+        for capture_name, nodes in captures.items():
+            if capture_name not in _CAPTURE_PRIORITY:
+                continue
+            for node in nodes:
+                key = (node.start_byte, node.end_byte)
+                range_captures.setdefault(key, []).append(capture_name)
+                range_node.setdefault(key, node)
+
+        # Build sorted token list
+        raw: list[tuple[int, int, int, int, int]] = []
+        for key, names in range_captures.items():
+            best: str = min(names, key=lambda n: _CAPTURE_PRIORITY.get(n, 999))
+            type_idx, mod_bits = _CAPTURE_TOKEN[best]
+            node = range_node[key]
+            row, col = node.start_point
+            end_row, end_col = node.end_point
+            if row != end_row:
+                continue  # skip multi-line nodes
+            length = end_col - col
+            if length <= 0:
+                continue
+            raw.append((row, col, length, type_idx, mod_bits))
+
+        raw.sort(key=lambda t: (t[0], t[1]))
+
+        # Remove tokens whose range is contained within the previous token
+        # (e.g. string_content inside string — keep the outer one)
+        deduped: list[tuple[int, int, int, int, int]] = []
+        for tok in raw:
+            if deduped:
+                prev = deduped[-1]
+                if tok[0] == prev[0] and tok[1] < prev[1] + prev[2]:
+                    continue
+            deduped.append(tok)
+
+        # Delta-encode
+        data: list[int] = []
+        prev_line = prev_col = 0
+        for line, col, length, type_idx, mod_bits in deduped:
+            delta_line = line - prev_line
+            delta_col = col if delta_line else col - prev_col
+            data.extend([delta_line, delta_col, length, type_idx, mod_bits])
+            prev_line, prev_col = line, col
+
+        return lsp.SemanticTokens(data=data)
 
     @staticmethod
     def _node_text(node: Node) -> str:

@@ -559,7 +559,7 @@ async def semantic_tokens_full(
     if doc is None:
         return None
 
-    return await server.python_delegate.get_semantic_tokens(doc.source, doc.path)
+    return server.parser.get_semantic_tokens(doc.source)
 
 
 @server.feature(lsp.TEXT_DOCUMENT_SEMANTIC_TOKENS_RANGE)
@@ -572,13 +572,10 @@ async def semantic_tokens_range(
     if doc is None:
         return None
 
-    return await server.python_delegate.get_semantic_tokens_range(
+    return server.parser.get_semantic_tokens(
         doc.source,
-        params.range.start.line,
-        params.range.start.character,
-        params.range.end.line,
-        params.range.end.character,
-        doc.path,
+        start_line=params.range.start.line,
+        end_line=params.range.end.line,
     )
 
 
