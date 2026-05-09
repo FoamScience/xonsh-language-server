@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from lsprotocol import types as lsp
 from pygls.lsp.server import LanguageServer
@@ -546,60 +546,69 @@ SEMANTIC_TOKENS_LEGEND = lsp.SemanticTokensLegend(
 )
 
 
-_SemanticToken = tuple[int, int, int, int, int]
+class _SemanticToken(NamedTuple):
+    line: int
+    col: int
+    length: int
+    token_type: int
+    modifiers: int
 
 
 def _decode_semantic_tokens(tokens: lsp.SemanticTokens | None) -> list[_SemanticToken]:
     if tokens is None:
         return []
-
-    result: list[_SemanticToken] = []
+    out: list[_SemanticToken] = []
     line = col = 0
     data = tokens.data
     for i in range(0, len(data), 5):
         delta_line, delta_col, length, token_type, modifiers = data[i:i + 5]
         line += delta_line
         col = delta_col if delta_line else col + delta_col
-        result.append((line, col, length, token_type, modifiers))
-    return result
+        out.append(_SemanticToken(line, col, length, token_type, modifiers))
+    return out
 
 
 def _encode_semantic_tokens(tokens: list[_SemanticToken]) -> lsp.SemanticTokens:
+    """Delta-encode tokens. Caller must pass them sorted by (line, col)."""
     data: list[int] = []
     prev_line = prev_col = 0
-    for line, col, length, token_type, modifiers in sorted(tokens, key=lambda t: (t[0], t[1])):
-        delta_line = line - prev_line
-        delta_col = col if delta_line else col - prev_col
-        data.extend([delta_line, delta_col, length, token_type, modifiers])
-        prev_line, prev_col = line, col
+    for tok in tokens:
+        delta_line = tok.line - prev_line
+        delta_col = tok.col if delta_line else tok.col - prev_col
+        data.extend([delta_line, delta_col, tok.length, tok.token_type, tok.modifiers])
+        prev_line, prev_col = tok.line, tok.col
     return lsp.SemanticTokens(data=data)
-
-
-def _tokens_overlap(a: _SemanticToken, b: _SemanticToken) -> bool:
-    if a[0] != b[0]:
-        return False
-    return a[1] < b[1] + b[2] and b[1] < a[1] + a[2]
 
 
 def _merge_semantic_tokens(
     parser_tokens: lsp.SemanticTokens | None,
     backend_tokens: lsp.SemanticTokens | None,
 ) -> lsp.SemanticTokens | None:
+    """Combine tree-sitter parser tokens with backend tokens.
+
+    The backend (Pyright/ty) wins on overlap because it carries type-aware
+    information (class vs variable, async, etc.) that tree-sitter cannot
+    deduce syntactically.
+    """
     if parser_tokens is None:
         return backend_tokens
     if backend_tokens is None:
         return parser_tokens
 
-    parser_abs = _decode_semantic_tokens(parser_tokens)
     backend_abs = _decode_semantic_tokens(backend_tokens)
+    backend_by_line: dict[int, list[_SemanticToken]] = {}
+    for b in backend_abs:
+        backend_by_line.setdefault(b.line, []).append(b)
 
-    if not parser_abs:
-        return backend_tokens
-    if not backend_abs:
-        return parser_tokens
+    def overlaps_backend(t: _SemanticToken) -> bool:
+        for b in backend_by_line.get(t.line, ()):
+            if t.col < b.col + b.length and b.col < t.col + t.length:
+                return True
+        return False
 
-    merged = [tok for tok in parser_abs if not any(_tokens_overlap(tok, b) for b in backend_abs)]
+    merged = [t for t in _decode_semantic_tokens(parser_tokens) if not overlaps_backend(t)]
     merged.extend(backend_abs)
+    merged.sort(key=lambda t: (t.line, t.col))
     return _encode_semantic_tokens(merged)
 
 
