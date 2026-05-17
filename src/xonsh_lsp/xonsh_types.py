@@ -52,15 +52,20 @@ def expression_type(node_type: str) -> str | None:
 # for use inside the generated stub. The registry includes informal forms like
 # "callable" (lowercase) and "int | tuple" that need cleaning before Pyright
 # will accept them.
+# Stub-friendly substitutions for registry type strings. Names that aren't
+# valid Python type expressions in the generated stub (no Callable import,
+# no xonsh-specific EnvPath, etc.) fall back to ``Any``.
 _NORMALIZE: dict[str, str] = {
-    "callable": "Callable[..., object]",
-    "Callable": "Callable[..., object]",
+    "callable": "__xonsh_typing__.Callable[..., object]",
+    "Callable": "__xonsh_typing__.Callable[..., object]",
     "set":      "set[str]",
     "list":     "list[str]",
     "tuple":    "tuple",
     "dict":     "dict[str, str]",
-    "path":     "Path",
-    "Path":     "Path",
+    "path":     "__xonsh_pathlib__.Path",
+    "Path":     "__xonsh_pathlib__.Path",
+    "EnvPath":  "__xonsh_typing__.Any",
+    "XonshSession": "__xonsh_typing__.Any",
 }
 
 
@@ -72,3 +77,42 @@ def to_python_type(type_str: str | None) -> str:
     parts = [p.strip() for p in type_str.split("|")]
     normalized = [_NORMALIZE.get(p, p) for p in parts]
     return " | ".join(normalized) if normalized else "object"
+
+
+def _identifier_ok(name: str) -> bool:
+    return name.isidentifier() and not name.startswith("__")
+
+
+def build_xonsh_env_typed_dict_lines(
+    user_defined: set[str] | None = None,
+    class_name: str = "__xonsh_env_dict__",
+    typing_alias: str = "__xonsh_typing__",
+) -> list[str]:
+    """Generate TypedDict body lines for ``__xonsh_env__``.
+
+    Combines the static xonsh env-var registry with user-defined names
+    discovered in the current document (typed ``Any`` in v1). The generated
+    class is fed into the Python backend so ``__xonsh_env__["HOME"]`` types
+    as ``str``, ``__xonsh_env__["XONSH_DEBUG"]`` as ``int``, etc.
+    """
+    lines: list[str] = [f"class {class_name}({typing_alias}.TypedDict, total=False):"]
+    seen: set[str] = set()
+    body_added = False
+
+    for name, entry in XONSH_MAGIC_VARS.items():
+        if not _identifier_ok(name):
+            continue  # e.g. "__xonsh__" — not a string env-var key
+        py_type = to_python_type(entry.get("type"))
+        lines.append(f"    {name}: {py_type}")
+        seen.add(name)
+        body_added = True
+
+    for name in sorted(user_defined or ()):
+        if name in seen or not _identifier_ok(name):
+            continue
+        lines.append(f"    {name}: {typing_alias}.Any")
+        body_added = True
+
+    if not body_added:
+        lines.append("    pass")
+    return lines

@@ -203,6 +203,12 @@ class PreprocessResult:
     Coordinates are in original source. Used by semantic tokens to emit
     synthetic tokens for xonsh constructs."""
 
+    user_env_vars: set[str] = field(default_factory=set)
+    """Env var names introduced in this document via ``$NAME = …``.
+
+    Fed into the backend's typed stub so user-defined env vars are visible to
+    Pyright/ty. Typed as ``Any`` in v1; RHS type inference deferred."""
+
 
 # ---------------------------------------------------------------------------
 # Line mapping utilities (unchanged)
@@ -314,9 +320,24 @@ def preprocess_with_mapping(source: str) -> PreprocessResult:
     replacement_regions: list[tuple[int, int, int, int, str]] = []  # (start_line, start_col, end_line, end_col, node_type)
     masked_lines: set[int] = set()
     xonsh_lines: set[int] = set()
+    user_env_vars: set[str] = set()
 
     if parse_result.tree is not None:
+        def _collect_env_assignment_name(node) -> None:
+            # env_assignment -> env_variable ($ + identifier) + '=' + rhs
+            for child in node.children:
+                if child.type == "env_variable":
+                    for sub in child.children:
+                        if sub.type == "identifier":
+                            user_env_vars.add(
+                                sub.text.decode("utf-8", errors="replace")
+                            )
+                            return
+
         def visit(node):
+            if node.type == "env_assignment":
+                _collect_env_assignment_name(node)
+                # fall through; env_assignment is _TRANSPARENT_TYPES below
             if node.type in _REPLACEABLE_TYPES:
                 repl = _compute_replacement(node, source_bytes)
                 replacements.append((node.start_byte, node.end_byte, repl))
@@ -416,6 +437,7 @@ def preprocess_with_mapping(source: str) -> PreprocessResult:
         masked_lines=masked_lines,
         xonsh_lines=xonsh_lines,
         replacement_regions=replacement_regions,
+        user_env_vars=user_env_vars,
     )
 
 

@@ -40,10 +40,20 @@ KNOWN_BACKENDS: dict[str, list[str]] = {
 # Stub declarations prepended to preprocessed source so the child backend
 # recognises xonsh placeholder variables (__xonsh_env__, etc.) and xonsh
 # Path extensions (.cd(), .mkdir() returning self, etc.).
-_XONSH_PREAMBLE_LINES = [
+#
+# __xonsh_env__ is generated per document as a TypedDict so that subscript
+# access (__xonsh_env__["HOME"]) types as ``str``, __xonsh_env__["XONSH_DEBUG"]
+# as ``int``, etc. — see build_xonsh_env_typed_dict_lines.
+# File-level pragma suppresses the not-required-access warning on
+# ``__xonsh_env__["X"]`` — xonsh treats env vars as defaulted, so flagging
+# every subscript as "may be missing" is noise, not a real bug.
+_XONSH_PREAMBLE_HEAD = [
+    "# pyright: reportTypedDictNotRequiredAccess=false",
     "import typing as __xonsh_typing__",
     "import pathlib as __xonsh_pathlib__",
-    "__xonsh_env__: dict[str, __xonsh_typing__.Any] = {}",
+]
+_XONSH_PREAMBLE_TAIL = [
+    "__xonsh_env__: __xonsh_env_dict__ = {}  # type: ignore",
     "__xonsh_subproc__: __xonsh_typing__.Any = None",
     "__xonsh_at__: __xonsh_typing__.Any = None",
     "class __xonsh_Path__(__xonsh_pathlib__.Path):",
@@ -53,8 +63,20 @@ _XONSH_PREAMBLE_LINES = [
     "    def __enter__(self) -> '__xonsh_Path__': ...",
     "    def __exit__(self, *a: __xonsh_typing__.Any) -> None: ...",
 ]
-_XONSH_PREAMBLE = "\n".join(_XONSH_PREAMBLE_LINES) + "\n"
-_XONSH_PREAMBLE_LINE_COUNT = len(_XONSH_PREAMBLE_LINES)
+
+
+def _build_xonsh_preamble(user_env_vars: set[str]) -> tuple[str, int]:
+    """Return (preamble_text, line_count) for the given doc's user env vars."""
+    from .xonsh_types import build_xonsh_env_typed_dict_lines
+
+    typed_dict_lines = build_xonsh_env_typed_dict_lines(user_env_vars)
+    all_lines = _XONSH_PREAMBLE_HEAD + typed_dict_lines + _XONSH_PREAMBLE_TAIL
+    return "\n".join(all_lines) + "\n", len(all_lines)
+
+
+# Baseline line count for documents with no user-defined env vars. Variable
+# (depends on the size of the env-var registry) but stable across runs.
+_XONSH_PREAMBLE_LINE_COUNT = _build_xonsh_preamble(set())[1]
 
 
 # Mapping from xonsh node types to semantic token type names.
@@ -388,8 +410,10 @@ class LspProxyBackend:
             p in preprocess_result.source
             for p in ("__xonsh_env__", "__xonsh_subproc__", "__xonsh_at__")
         ):
-            masked_source = _XONSH_PREAMBLE + masked_source
-            preamble_lines = _XONSH_PREAMBLE_LINE_COUNT
+            preamble_text, preamble_lines = _build_xonsh_preamble(
+                preprocess_result.user_env_vars
+            )
+            masked_source = preamble_text + masked_source
 
         uri = self._file_uri(path)
 

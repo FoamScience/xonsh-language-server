@@ -45,6 +45,13 @@ A Language Server Protocol (LSP) implementation for [xonsh](https://xon.sh/), th
   - [x] Functions, classes, variables, modules
 - [x] **Code Actions**
   - [x] Quick fix for undefined environment variables
+- [x] **Inlay Hints**
+  - [x] Type annotations after xonsh expressions (`$()`, `!()`, `p"…"`, `$VAR`, …)
+  - [x] Env-var values after `$VAR` (opt-in via `inlayHints.envVarValues`)
+  - [x] Python inlay hints forwarded from the backend (Pyright/ty)
+- [x] **Typed `__xonsh_env__` stub for the Python backend**
+  - [x] Generated TypedDict from xonsh's env-var registry — `$XONSH_DEBUG` types as `int`, `$AUTO_CD` as `bool`, etc. (Pyright/ty backends only)
+  - [x] User-defined env vars (`$X = …`) added per-document as `Any`
 - [x] **Multi-Backend Support**
   - [x] Built-in Jedi backend (default, no external dependencies)
   - [x] LSP proxy to Pyright, basedpyright, pylsp, ty, or any LSP server
@@ -315,7 +322,20 @@ The full set of `initializationOptions` accepted by xonsh-lsp:
   // Off by default because most editors already highlight xonsh via
   // tree-sitter or a TextMate grammar, and overlapping semantic tokens can
   // fight with those. Turn on if your editor relies on LSP for highlighting.
-  "semanticTokens": false
+  "semanticTokens": false,
+
+  // Inlay-hint preferences. The xonsh server emits native hints for
+  // xonsh-specific syntax in addition to whatever the Python backend
+  // returns for Python regions.
+  "inlayHints": {
+    // ": str" / ": CommandPipeline" / ": Path" / ": bool" (from the
+    // xonsh env var registry) after $VAR, $(), !(), p"…", etc.
+    "xonshTypes": true,
+    // " = /home/user" after $HOME (resolved from the server's process env).
+    "envVarValues": false,
+    // Alias kind after unknown commands (reserved for v2).
+    "aliasResolution": false
+  }
 }
 ```
 

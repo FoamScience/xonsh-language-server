@@ -488,8 +488,10 @@ class TestLspProxyBackendPreamble:
         uri, processed = backend._sync_document(source, _test_path("file.xsh"))
 
         text = backend._client.text_document_did_open.call_args[0][0].text_document.text
-        assert text.startswith("import typing as __xonsh_typing__")
-        assert "__xonsh_env__: dict[str, __xonsh_typing__.Any]" in text
+        assert "import typing as __xonsh_typing__" in text
+        # Generated TypedDict from XONSH_MAGIC_VARS gives __xonsh_env__ typed access.
+        assert "class __xonsh_env_dict__(__xonsh_typing__.TypedDict" in text
+        assert "__xonsh_env__: __xonsh_env_dict__" in text
         assert "__xonsh_subproc__: __xonsh_typing__.Any" in text
         assert "__xonsh_at__: __xonsh_typing__.Any" in text
 

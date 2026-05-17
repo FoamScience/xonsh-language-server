@@ -35,8 +35,12 @@ def test_expression_type_unknown_node():
 
 def test_to_python_type_normalizes_callable():
     # Registry stores "callable" (lowercase) which isn't a valid type expr.
-    assert to_python_type("callable") == "Callable[..., object]"
-    assert to_python_type("str | callable") == "str | Callable[..., object]"
+    # Generated stub references typing.Callable via the __xonsh_typing__ alias.
+    assert to_python_type("callable") == "__xonsh_typing__.Callable[..., object]"
+    assert (
+        to_python_type("str | callable")
+        == "str | __xonsh_typing__.Callable[..., object]"
+    )
 
 
 def test_to_python_type_widens_bare_collections():

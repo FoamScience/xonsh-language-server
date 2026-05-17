@@ -57,6 +57,9 @@ class XonshLanguageServer(LanguageServer):
         self.diagnostics_provider = XonshDiagnosticsProvider(self)
         self.hover_provider = XonshHoverProvider(self)
         self.definition_provider = XonshDefinitionProvider(self)
+        from xonsh_lsp.inlay_hints import InlayHintConfig, XonshInlayHintProvider
+        self._inlay_hint_config = InlayHintConfig()
+        self.inlay_hint_provider = XonshInlayHintProvider(self._inlay_hint_config)
 
         # Cache for parsed documents
         self._parse_cache: dict[str, ParseResult] = {}
@@ -191,6 +194,10 @@ async def initialize(params: lsp.InitializeParams) -> None:
 
         if "semanticTokens" in opts:
             server._semantic_tokens_enabled = bool(opts["semanticTokens"])
+
+        from xonsh_lsp.inlay_hints import InlayHintConfig
+        server._inlay_hint_config = InlayHintConfig.from_options(opts)
+        server.inlay_hint_provider.config = server._inlay_hint_config
 
     # Create the backend (started in `initialized` after handshake completes)
     server.python_backend = _create_backend(
@@ -509,13 +516,24 @@ async def inlay_hint(params: lsp.InlayHintParams) -> list[lsp.InlayHint] | None:
     if doc is None:
         return None
 
-    hints = await server.python_delegate.get_inlay_hints(
+    native = server.inlay_hint_provider.get_hints(
+        server.parse_document(uri), params.range
+    )
+    backend = await server.python_delegate.get_inlay_hints(
         doc.source,
         params.range.start.line,
         params.range.end.line,
         doc.path,
     )
-    return hints or None
+
+    # Native hints win on position collisions: they carry xonsh-specific
+    # knowledge (e.g. $XONSH_DEBUG: int) that the backend can't deduce.
+    taken = {(h.position.line, h.position.character) for h in native}
+    merged = list(native)
+    for h in backend or []:
+        if (h.position.line, h.position.character) not in taken:
+            merged.append(h)
+    return merged or None
 
 
 @server.feature(lsp.INLAY_HINT_RESOLVE)
