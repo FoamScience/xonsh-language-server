@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "xonsh-lsp"
-version = "0.2.0"
+version = "0.2.1"
 description = "Language Server Protocol implementation for xonsh"
 readme = "README.md"
 license = "MIT"
