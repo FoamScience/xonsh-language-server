@@ -545,16 +545,15 @@ class XonshParser:
         "list", "dictionary", "set", "tuple",
     }
 
-    def get_folding_ranges(self, source: str) -> list[dict]:
-        """Extract folding ranges from source code.
+    def get_folding_ranges(self, parse_result: ParseResult | None) -> list[dict]:
+        """Extract folding ranges from a parsed document.
 
         Returns a list of dicts with keys:
         - start_line: 0-based start line
         - end_line: 0-based end line
         - kind: "region", "comment", or "imports"
         """
-        result = self.parse(source)
-        if result.tree is None:
+        if parse_result is None or parse_result.tree is None:
             return []
 
         ranges: list[dict] = []
@@ -610,12 +609,12 @@ class XonshParser:
             for child in node.children:
                 visit(child)
 
-        visit(result.tree.root_node)
+        visit(parse_result.tree.root_node)
         flush_comments()
         return ranges
 
-    def get_document_symbols(self, source: str) -> list[dict]:
-        """Extract document symbols from source code.
+    def get_document_symbols(self, parse_result: ParseResult | None) -> list[dict]:
+        """Extract document symbols from a parsed document.
 
         Returns a list of symbol dicts with keys:
         - name: symbol name
@@ -626,8 +625,7 @@ class XonshParser:
         - end_col: 0-based end column
         - detail: optional detail string
         """
-        result = self.parse(source)
-        if result.tree is None:
+        if parse_result is None or parse_result.tree is None:
             return []
 
         symbols = []
@@ -779,7 +777,7 @@ class XonshParser:
             for child in node.children:
                 visit(child)
 
-        visit(result.tree.root_node)
+        visit(parse_result.tree.root_node)
         return symbols
 
     def get_macro_name(self, node_info: NodeInfo) -> str | None:
