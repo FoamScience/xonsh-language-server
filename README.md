@@ -5,6 +5,7 @@ A Language Server Protocol (LSP) implementation for [xonsh](https://xon.sh/), th
 ## Features
 
 - [x] **Syntax Highlighting** (via tree-sitter-xonsh integration)
+  - And optional symantic tokens (contributed by @nahoj, #6)
 - [x] **Code Completion**
   - [x] Environment variables (`$VAR`, `${expr}`)
   - [x] Subprocess commands from PATH
@@ -88,6 +89,9 @@ xonsh-lsp --python-backend ty
 
 # Use a custom LSP server command
 xonsh-lsp --python-backend lsp-proxy --backend-command my-lsp-server --stdio
+
+# Enable LSP semantic-tokens syntax highlighting (off by default)
+xonsh-lsp --semantic-tokens
 ```
 
 ### Neovim Integration
@@ -305,7 +309,13 @@ The full set of `initializationOptions` accepted by xonsh-lsp:
   // Normally you should configure your backend via the editor's settings
   // (e.g. Neovim's `settings = { ... }`), which are forwarded transparently.
   // Use this only if your editor doesn't support workspace/configuration.
-  "backendSettings": { }
+  "backendSettings": { },
+
+  // Enable LSP semantic tokens for syntax highlighting (default: false).
+  // Off by default because most editors already highlight xonsh via
+  // tree-sitter or a TextMate grammar, and overlapping semantic tokens can
+  // fight with those. Turn on if your editor relies on LSP for highlighting.
+  "semanticTokens": false
 }
 ```
 

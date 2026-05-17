@@ -66,6 +66,11 @@ class XonshLanguageServer(LanguageServer):
         self._backend_command: list[str] | None = None
         self._backend_settings: dict[str, Any] = {}
         self._workspace_root: str | None = None
+        # Semantic tokens are off by default — most editors already provide
+        # syntax highlighting via tree-sitter or a TextMate grammar, and
+        # LSP semantic tokens can fight with them. Opt-in via
+        # initializationOptions.semanticTokens or --semantic-tokens.
+        self._semantic_tokens_enabled: bool = False
 
     @property
     def python_delegate(self) -> PythonBackend:
@@ -183,6 +188,9 @@ async def initialize(params: lsp.InitializeParams) -> None:
             server._backend_command = backend_command
         if backend_settings:
             server._backend_settings = backend_settings
+
+        if "semanticTokens" in opts:
+            server._semantic_tokens_enabled = bool(opts["semanticTokens"])
 
     # Create the backend (started in `initialized` after handshake completes)
     server.python_backend = _create_backend(
@@ -620,6 +628,8 @@ async def semantic_tokens_full(
     params: lsp.SemanticTokensParams,
 ) -> lsp.SemanticTokens | None:
     """Provide semantic tokens for the full document."""
+    if not server._semantic_tokens_enabled:
+        return None
     uri = params.text_document.uri
     doc = server.get_document(uri)
     if doc is None:
@@ -634,6 +644,8 @@ async def semantic_tokens_range(
     params: lsp.SemanticTokensRangeParams,
 ) -> lsp.SemanticTokens | None:
     """Provide semantic tokens for a range."""
+    if not server._semantic_tokens_enabled:
+        return None
     uri = params.text_document.uri
     doc = server.get_document(uri)
     if doc is None:
@@ -786,6 +798,14 @@ def main() -> None:
         nargs="+",
         help='Command to start the backend LSP server (e.g. "pyright-langserver --stdio")',
     )
+    parser.add_argument(
+        "--semantic-tokens",
+        action="store_true",
+        default=False,
+        help="Enable LSP semantic tokens for syntax highlighting "
+             "(off by default; most editors already highlight via tree-sitter "
+             "or a TextMate grammar).",
+    )
 
     args = parser.parse_args()
 
@@ -795,6 +815,7 @@ def main() -> None:
     # Store backend configuration for use during initialization
     server._backend_name = args.python_backend
     server._backend_command = args.backend_command
+    server._semantic_tokens_enabled = args.semantic_tokens
 
     if args.tcp:
         logger.info(f"Starting xonsh-lsp in TCP mode on {args.host}:{args.port}")

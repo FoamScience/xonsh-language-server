@@ -24,6 +24,13 @@ def backend():
     return backend
 
 
+@pytest.fixture(autouse=True)
+def _enable_semantic_tokens(monkeypatch):
+    # Semantic tokens are off by default in production; the existing tests
+    # exercise the handler logic, so flip the flag on for each test here.
+    monkeypatch.setattr(server_module.server, "_semantic_tokens_enabled", True)
+
+
 @pytest.mark.asyncio
 async def test_semantic_tokens_full_uses_python_backend(
     monkeypatch,
@@ -140,3 +147,30 @@ async def test_semantic_tokens_range_uses_python_backend(
         document.path,
     )
     assert result == lsp.SemanticTokens(data=[0, 0, 7, 5, 0])
+
+
+@pytest.mark.asyncio
+async def test_semantic_tokens_disabled_returns_none(monkeypatch, document, backend):
+    monkeypatch.setattr(server_module.server, "_semantic_tokens_enabled", False)
+    monkeypatch.setattr(server_module.server, "get_document", lambda uri: document)
+    monkeypatch.setattr(server_module.server, "python_backend", backend)
+
+    full = await server_module.semantic_tokens_full(
+        lsp.SemanticTokensParams(
+            text_document=lsp.TextDocumentIdentifier(uri="file:///test/file.xsh")
+        )
+    )
+    rng = await server_module.semantic_tokens_range(
+        lsp.SemanticTokensRangeParams(
+            text_document=lsp.TextDocumentIdentifier(uri="file:///test/file.xsh"),
+            range=lsp.Range(
+                start=lsp.Position(line=0, character=0),
+                end=lsp.Position(line=0, character=9),
+            ),
+        )
+    )
+
+    assert full is None
+    assert rng is None
+    backend.get_semantic_tokens.assert_not_awaited()
+    backend.get_semantic_tokens_range.assert_not_awaited()
