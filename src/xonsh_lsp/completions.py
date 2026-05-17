@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 import os
+import pkgutil
 import shutil
+import sys
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -33,6 +35,7 @@ class XonshCompletionProvider:
         self.server = server
         self._command_cache: list[str] | None = None
         self._command_cache_time: float = 0
+        self._imp_module_cache: list[str] | None = None
 
     async def get_completions(self, params: lsp.CompletionParams) -> lsp.CompletionList | None:
         """Get completions at the given position."""
@@ -100,6 +103,12 @@ class XonshCompletionProvider:
             at_obj_items = self._get_at_object_completions(text_before)
             logger.debug(f"Added {len(at_obj_items)} @ object completions")
             items.extend(at_obj_items)
+
+            imp_attr_items = await self._get_imp_attribute_completions(
+                text_before, doc.path
+            )
+            logger.debug(f"Added {len(imp_attr_items)} @.imp attribute completions")
+            items.extend(imp_attr_items)
 
         # Xontrib completions
         if "xontrib" in text_before.lower():
@@ -447,15 +456,19 @@ class XonshCompletionProvider:
 
     def _get_at_object_completions(self, text_before: str) -> list[lsp.CompletionItem]:
         """Get @ object attribute completions (@.env, @.imp, etc.)."""
+        if "@." not in text_before:
+            return []
+
+        after_at = text_before.split("@.")[-1]
+
+        if "." in after_at:
+            head, _, tail = after_at.partition(".")
+            if head == "imp" and "." not in tail:
+                return self._get_imp_module_completions(tail)
+            return []
+
+        prefix = after_at
         items = []
-
-        # Get prefix after @.
-        prefix = ""
-        if "@." in text_before:
-            after_at = text_before.split("@.")[-1]
-            # Handle chained access like @.imp.json
-            prefix = after_at.split(".")[0] if "." in after_at else after_at
-
         for name, info in XONSH_AT_OBJECTS.items():
             if prefix.lower() in name.lower():
                 items.append(
@@ -472,6 +485,83 @@ class XonshCompletionProvider:
                     )
                 )
 
+        return items
+
+    def _get_top_level_modules(self) -> list[str]:
+        """Return cached list of importable top-level Python modules."""
+        if self._imp_module_cache is not None:
+            return self._imp_module_cache
+
+        names: set[str] = set(sys.builtin_module_names)
+        try:
+            for module_info in pkgutil.iter_modules():
+                name = module_info.name
+                if name and not name.startswith("_"):
+                    names.add(name)
+        except Exception as e:
+            logger.debug(f"pkgutil.iter_modules failed: {e}")
+
+        self._imp_module_cache = sorted(n for n in names if not n.startswith("_"))
+        return self._imp_module_cache
+
+    async def _get_imp_attribute_completions(
+        self, text_before: str, doc_path: str | None
+    ) -> list[lsp.CompletionItem]:
+        """Complete attributes of `@.imp.<dotted.path>.<prefix>` via the Python backend.
+
+        We feed the backend a synthetic source `import <dotted>; <dotted>.<prefix>`
+        so Jedi/Pyright/ty resolve the module's real attributes without us
+        importing it ourselves.
+        """
+        if "@.imp." not in text_before:
+            return []
+
+        after_imp = text_before.rsplit("@.imp.", 1)[-1]
+        if "." not in after_imp:
+            # `@.imp.<prefix>` — handled by module-name completion.
+            return []
+
+        parts = after_imp.split(".")
+        # Last entry is the prefix being typed (may be "" after a trailing dot).
+        if not all(p == "" or p.isidentifier() for p in parts):
+            return []
+
+        *module_parts, prefix = parts
+        if not module_parts or not all(module_parts):
+            return []
+
+        dotted = ".".join(module_parts)
+        synthetic = f"import {dotted}\n{dotted}.{prefix}"
+        line = 1
+        col = len(dotted) + 1 + len(prefix)
+
+        try:
+            return await self.server.python_delegate.get_completions(
+                synthetic, line, col, doc_path
+            )
+        except Exception as e:
+            logger.debug(f"@.imp deep completion failed: {e}")
+            return []
+
+    def _get_imp_module_completions(self, prefix: str) -> list[lsp.CompletionItem]:
+        """Complete top-level Python module names after `@.imp.`."""
+        items = []
+        prefix_lower = prefix.lower()
+        for name in self._get_top_level_modules():
+            if name.lower().startswith(prefix_lower):
+                items.append(
+                    lsp.CompletionItem(
+                        label=name,
+                        kind=lsp.CompletionItemKind.Module,
+                        detail="@.imp module",
+                        documentation=lsp.MarkupContent(
+                            kind=lsp.MarkupKind.Markdown,
+                            value=f"Import `{name}` lazily via `@.imp.{name}`.",
+                        ),
+                        insert_text=name,
+                        sort_text=f"0_{name}",
+                    )
+                )
         return items
 
     def _get_xontrib_completions(self, text_before: str) -> list[lsp.CompletionItem]:
