@@ -172,30 +172,6 @@ def _python_identifier_range_at_position(
     )
 
 
-def _range_key(range_: lsp.Range) -> tuple[int, int, int, int]:
-    return (
-        range_.start.line,
-        range_.start.character,
-        range_.end.line,
-        range_.end.character,
-    )
-
-
-def _source_text_for_range(source: str, range_: lsp.Range) -> str | None:
-    if range_.start.line != range_.end.line:
-        return None
-
-    lines = source.splitlines()
-    if range_.start.line < 0 or range_.start.line >= len(lines):
-        return None
-
-    line = lines[range_.start.line]
-    if range_.start.character < 0 or range_.end.character > len(line):
-        return None
-
-    return line[range_.start.character:range_.end.character]
-
-
 def _create_backend(
     backend_name: str,
     backend_command: list[str] | None,
@@ -506,7 +482,7 @@ async def references(params: lsp.ReferenceParams) -> list[lsp.Location] | None:
 
 @server.feature(lsp.TEXT_DOCUMENT_RENAME, lsp.RenameOptions(prepare_provider=False))
 async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
-    """Rename Python identifiers."""
+    """Rename Python identifiers by delegating to the active backend."""
     uri = params.text_document.uri
     doc = server.get_document(uri)
     if doc is None:
@@ -515,6 +491,8 @@ async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
     if not _is_python_identifier(params.new_name):
         return None
 
+    # Reject env vars and other non-Python-identifier targets up front so
+    # backends don't get asked to rename `FOO` inside `$FOO`.
     target_range = _python_identifier_range_at_position(
         doc.source,
         params.position.line,
@@ -523,37 +501,13 @@ async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
     if target_range is None:
         return None
 
-    old_name = _source_text_for_range(doc.source, target_range)
-    if old_name is None:
-        return None
-
-    refs = await server.python_delegate.get_references(
+    return await server.python_delegate.rename(
         doc.source,
         params.position.line,
         params.position.character,
+        params.new_name,
         doc.path,
     )
-
-    edits: list[lsp.TextEdit] = []
-    seen: set[tuple[int, int, int, int]] = set()
-    for ref in refs:
-        if ref.uri != uri:
-            continue
-
-        key = _range_key(ref.range)
-        if key in seen:
-            continue
-
-        if _source_text_for_range(doc.source, ref.range) != old_name:
-            continue
-
-        seen.add(key)
-        edits.append(lsp.TextEdit(range=ref.range, new_text=params.new_name))
-
-    if not edits:
-        return None
-
-    return lsp.WorkspaceEdit(changes={uri: edits})
 
 
 # ============================================================================
