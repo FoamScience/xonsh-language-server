@@ -482,7 +482,7 @@ async def references(params: lsp.ReferenceParams) -> list[lsp.Location] | None:
 
 @server.feature(lsp.TEXT_DOCUMENT_RENAME, lsp.RenameOptions(prepare_provider=False))
 async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
-    """Rename Python identifiers by delegating to the active backend."""
+    """Rename Python identifiers."""
     uri = params.text_document.uri
     doc = server.get_document(uri)
     if doc is None:
