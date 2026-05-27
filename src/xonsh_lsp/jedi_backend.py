@@ -9,17 +9,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from lsprotocol import types as lsp
 
 from xonsh_lsp.preprocessing import (
-    PreprocessResult,
     map_position_from_processed,
     map_position_to_processed,
     preprocess_source,
     preprocess_with_mapping,
 )
+from xonsh_lsp.python_backend_common import remap_text_edit
 
 try:
     import jedi
@@ -306,7 +305,6 @@ class JediBackend:
             if not file_changes:
                 return None
 
-            masked = preprocess_result.masked_lines
             changes: dict[str, list[lsp.TextEdit]] = {}
 
             for file_path, node_changes in file_changes.items():
@@ -325,35 +323,17 @@ class JediBackend:
                 for node in node_changes:
                     start_line_1, start_col = node.start_pos
                     end_line_1, end_col = node.end_pos
-                    start_line = start_line_1 - 1
-                    end_line = end_line_1 - 1
-
-                    if is_current:
-                        orig_start_line, orig_start_col = (
-                            map_position_from_processed(
-                                preprocess_result, start_line, start_col
-                            )
-                        )
-                        orig_end_line, orig_end_col = map_position_from_processed(
-                            preprocess_result, end_line, end_col
-                        )
-                        if orig_start_line in masked:
-                            continue
-                        edit_range = lsp.Range(
-                            start=lsp.Position(
-                                line=orig_start_line, character=orig_start_col
-                            ),
-                            end=lsp.Position(
-                                line=orig_end_line, character=orig_end_col
-                            ),
-                        )
-                    else:
-                        edit_range = lsp.Range(
-                            start=lsp.Position(line=start_line, character=start_col),
-                            end=lsp.Position(line=end_line, character=end_col),
-                        )
-
-                    edits.append(lsp.TextEdit(range=edit_range, new_text=new_name))
+                    text_edit = remap_text_edit(
+                        preprocess_result,
+                        start_line_1 - 1,
+                        start_col,
+                        end_line_1 - 1,
+                        end_col,
+                        new_name,
+                        is_current=is_current,
+                    )
+                    if text_edit is not None:
+                        edits.append(text_edit)
 
                 if edits:
                     changes.setdefault(target_uri, []).extend(edits)

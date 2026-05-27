@@ -10,7 +10,7 @@ and handles asynchronous diagnostics.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, Union
 
@@ -23,6 +23,7 @@ from xonsh_lsp.preprocessing import (
     map_position_to_processed,
     preprocess_with_mapping,
 )
+from xonsh_lsp.python_backend_common import remap_text_edit
 
 if TYPE_CHECKING:
     from pygls.lsp.server import LanguageServer
@@ -676,7 +677,6 @@ class LspProxyBackend:
         kept. File-level operations (create/rename/delete file) are dropped.
         """
         preamble = self._preamble_offset(current_uri)
-        masked = current_pp.masked_lines
 
         def remap_edits(
             child_uri: str, edits: Sequence[lsp.TextEdit]
@@ -685,30 +685,18 @@ class LspProxyBackend:
             is_current = child_uri == current_uri
             remapped: list[lsp.TextEdit] = []
             for e in edits:
-                if is_current:
-                    start_line = e.range.start.line - preamble
-                    end_line = e.range.end.line - preamble
-                    if start_line < 0:
-                        continue
-                    orig_start_line, orig_start_col = map_position_from_processed(
-                        current_pp, start_line, e.range.start.character
-                    )
-                    orig_end_line, orig_end_col = map_position_from_processed(
-                        current_pp, end_line, e.range.end.character
-                    )
-                    if orig_start_line in masked:
-                        continue
-                    new_range = lsp.Range(
-                        start=lsp.Position(
-                            line=orig_start_line, character=orig_start_col
-                        ),
-                        end=lsp.Position(
-                            line=orig_end_line, character=orig_end_col
-                        ),
-                    )
-                else:
-                    new_range = e.range
-                remapped.append(lsp.TextEdit(range=new_range, new_text=e.new_text))
+                text_edit = remap_text_edit(
+                    current_pp,
+                    e.range.start.line,
+                    e.range.start.character,
+                    e.range.end.line,
+                    e.range.end.character,
+                    e.new_text,
+                    is_current=is_current,
+                    preamble_offset=preamble,
+                )
+                if text_edit is not None:
+                    remapped.append(text_edit)
             return original_uri, remapped
 
         changes: dict[str, list[lsp.TextEdit]] = {}
