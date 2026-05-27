@@ -9,17 +9,16 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
 
 from lsprotocol import types as lsp
 
 from xonsh_lsp.preprocessing import (
-    PreprocessResult,
     map_position_from_processed,
     map_position_to_processed,
     preprocess_source,
     preprocess_with_mapping,
 )
+from xonsh_lsp.python_backend_common import remap_text_edit
 
 try:
     import jedi
@@ -270,6 +269,83 @@ class JediBackend:
         except Exception as e:
             logger.debug(f"Jedi references error: {e}")
             return []
+
+    async def rename(
+        self,
+        source: str,
+        line: int,
+        col: int,
+        new_name: str,
+        path: str | None = None,
+    ) -> lsp.WorkspaceEdit | None:
+        """Rename a Python symbol using Jedi."""
+        if not JEDI_AVAILABLE:
+            return None
+
+        try:
+            preprocess_result = preprocess_with_mapping(source)
+            mapped_line, mapped_col = map_position_to_processed(
+                preprocess_result, line, col
+            )
+
+            script = Script(preprocess_result.source, path=path)
+            try:
+                refactoring = script.rename(
+                    mapped_line + 1, mapped_col, new_name=new_name
+                )
+            except Exception as e:
+                logger.debug(f"Jedi rename refused: {e}")
+                return None
+
+            # Jedi exposes structured ranges via parso Name nodes in the
+            # private `_file_to_node_changes` dict. The public surface
+            # (`get_diff`, `get_new_code`) only returns text, which we'd have
+            # to diff to recover ranges.
+            file_changes = getattr(refactoring, "_file_to_node_changes", None)
+            if not file_changes:
+                return None
+
+            changes: dict[str, list[lsp.TextEdit]] = {}
+
+            for file_path, node_changes in file_changes.items():
+                # Jedi uses None for the in-memory script's path
+                if file_path is None:
+                    if path is None:
+                        target_uri = "file:///untitled.xsh"
+                    else:
+                        target_uri = Path(path).as_uri()
+                    is_current = True
+                else:
+                    target_uri = Path(str(file_path)).as_uri()
+                    is_current = path is not None and str(file_path) == path
+
+                edits: list[lsp.TextEdit] = []
+                for node in node_changes:
+                    start_line_1, start_col = node.start_pos
+                    end_line_1, end_col = node.end_pos
+                    text_edit = remap_text_edit(
+                        preprocess_result,
+                        start_line_1 - 1,
+                        start_col,
+                        end_line_1 - 1,
+                        end_col,
+                        new_name,
+                        is_current=is_current,
+                    )
+                    if text_edit is not None:
+                        edits.append(text_edit)
+
+                if edits:
+                    changes.setdefault(target_uri, []).extend(edits)
+
+            if not changes:
+                return None
+
+            return lsp.WorkspaceEdit(changes=changes)
+
+        except Exception as e:
+            logger.debug(f"Jedi rename error: {e}")
+            return None
 
     async def get_diagnostics(
         self,

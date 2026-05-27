@@ -7,8 +7,10 @@ Main LSP server implementation using pygls.
 from __future__ import annotations
 
 import argparse
+import keyword
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from lsprotocol import types as lsp
@@ -121,6 +123,41 @@ server = XonshLanguageServer(
     name="xonsh-lsp",
     version=_xonsh_lsp_version,
 )
+
+
+def _is_python_identifier(value: str) -> bool:
+    return value.isidentifier() and not keyword.iskeyword(value)
+
+
+_IDENT_RE = re.compile(r"[^\W\d]\w*")
+
+
+def _python_identifier_range_at_position(
+    source: str,
+    line: int,
+    character: int,
+) -> lsp.Range | None:
+    lines = source.splitlines()
+    if not 0 <= line < len(lines):
+        return None
+    line_text = lines[line]
+
+    for m in _IDENT_RE.finditer(line_text):
+        start, end = m.span()
+        if not start <= character <= end:
+            continue
+        if not _is_python_identifier(m.group()):
+            return None
+        # Reject xonsh env-var prefixes: $FOO and ${FOO}.
+        if start > 0 and line_text[start - 1] == "$":
+            return None
+        if start >= 2 and line_text[start - 2 : start] == "${":
+            return None
+        return lsp.Range(
+            start=lsp.Position(line=line, character=start),
+            end=lsp.Position(line=line, character=end),
+        )
+    return None
 
 
 def _create_backend(
@@ -424,6 +461,41 @@ async def references(params: lsp.ReferenceParams) -> list[lsp.Location] | None:
             unique_refs.append(ref)
 
     return unique_refs if unique_refs else None
+
+
+# ============================================================================
+# Rename
+# ============================================================================
+
+
+@server.feature(lsp.TEXT_DOCUMENT_RENAME, lsp.RenameOptions(prepare_provider=False))
+async def rename(params: lsp.RenameParams) -> lsp.WorkspaceEdit | None:
+    """Rename Python identifiers."""
+    uri = params.text_document.uri
+    doc = server.get_document(uri)
+    if doc is None:
+        return None
+
+    if not _is_python_identifier(params.new_name):
+        return None
+
+    # Reject env vars and other non-Python-identifier targets up front so
+    # backends don't get asked to rename `FOO` inside `$FOO`.
+    target_range = _python_identifier_range_at_position(
+        doc.source,
+        params.position.line,
+        params.position.character,
+    )
+    if target_range is None:
+        return None
+
+    return await server.python_delegate.rename(
+        doc.source,
+        params.position.line,
+        params.position.character,
+        params.new_name,
+        doc.path,
+    )
 
 
 # ============================================================================

@@ -10,9 +10,9 @@ and handles asynchronous diagnostics.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, Union
 
 from lsprotocol import types as lsp
 from pygls.lsp.client import LanguageClient
@@ -23,6 +23,7 @@ from xonsh_lsp.preprocessing import (
     map_position_to_processed,
     preprocess_with_mapping,
 )
+from xonsh_lsp.python_backend_common import remap_text_edit
 
 if TYPE_CHECKING:
     from pygls.lsp.server import LanguageServer
@@ -624,6 +625,104 @@ class LspProxyBackend:
         except Exception as e:
             logger.debug(f"Proxy references error: {e}")
             return []
+
+    async def rename(
+        self,
+        source: str,
+        line: int,
+        col: int,
+        new_name: str,
+        path: str | None = None,
+    ) -> lsp.WorkspaceEdit | None:
+        """Rename via the child LSP server, remapping ranges back to xonsh."""
+        if not self._started or self._client is None:
+            return None
+
+        try:
+            preprocess_result = preprocess_with_mapping(source)
+            uri = self._file_uri(path)
+            self._sync_document(source, path)
+
+            mapped_line, mapped_col = map_position_to_processed(
+                preprocess_result, line, col
+            )
+            mapped_line += self._preamble_offset(uri)
+
+            result = await self._client.text_document_rename_async(
+                lsp.RenameParams(
+                    text_document=lsp.TextDocumentIdentifier(uri=uri),
+                    position=lsp.Position(line=mapped_line, character=mapped_col),
+                    new_name=new_name,
+                )
+            )
+
+            if result is None:
+                return None
+
+            return self._remap_workspace_edit(result, preprocess_result, uri)
+
+        except Exception as e:
+            logger.debug(f"Proxy rename error: {e}")
+            return None
+
+    def _remap_workspace_edit(
+        self,
+        edit: lsp.WorkspaceEdit,
+        current_pp: PreprocessResult,
+        current_uri: str,
+    ) -> lsp.WorkspaceEdit | None:
+        """Remap a WorkspaceEdit from child coordinates to original xonsh.
+
+        Only `changes` and `TextDocumentEdit` entries in `document_changes` are
+        kept. File-level operations (create/rename/delete file) are dropped.
+        """
+        preamble = self._preamble_offset(current_uri)
+
+        def remap_edits(
+            child_uri: str, edits: Sequence[lsp.TextEdit]
+        ) -> tuple[str, list[lsp.TextEdit]]:
+            original_uri = self._uri_map.get(child_uri, child_uri)
+            is_current = child_uri == current_uri
+            remapped: list[lsp.TextEdit] = []
+            for e in edits:
+                text_edit = remap_text_edit(
+                    current_pp,
+                    e.range.start.line,
+                    e.range.start.character,
+                    e.range.end.line,
+                    e.range.end.character,
+                    e.new_text,
+                    is_current=is_current,
+                    preamble_offset=preamble,
+                )
+                if text_edit is not None:
+                    remapped.append(text_edit)
+            return original_uri, remapped
+
+        changes: dict[str, list[lsp.TextEdit]] = {}
+
+        if edit.changes:
+            for child_uri, edits in edit.changes.items():
+                target_uri, remapped = remap_edits(child_uri, edits)
+                if remapped:
+                    changes.setdefault(target_uri, []).extend(remapped)
+
+        if edit.document_changes:
+            for doc_change in edit.document_changes:
+                if not isinstance(doc_change, lsp.TextDocumentEdit):
+                    continue  # drop file-level operations for now
+                child_uri = doc_change.text_document.uri
+                text_edits = [
+                    te for te in doc_change.edits if isinstance(te, lsp.TextEdit)
+                ]
+                target_uri, remapped = remap_edits(child_uri, text_edits)
+                if remapped:
+                    changes.setdefault(target_uri, []).extend(remapped)
+
+        if not changes:
+            return None
+
+        return lsp.WorkspaceEdit(changes=changes)
 
     async def get_diagnostics(
         self, source: str, path: str | None = None
