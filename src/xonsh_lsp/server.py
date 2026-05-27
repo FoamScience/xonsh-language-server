@@ -10,6 +10,7 @@ import argparse
 import keyword
 import logging
 import os
+import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from lsprotocol import types as lsp
@@ -128,48 +129,35 @@ def _is_python_identifier(value: str) -> bool:
     return value.isidentifier() and not keyword.iskeyword(value)
 
 
+_IDENT_RE = re.compile(r"[^\W\d]\w*")
+
+
 def _python_identifier_range_at_position(
     source: str,
     line: int,
     character: int,
 ) -> lsp.Range | None:
     lines = source.splitlines()
-    if line < 0 or line >= len(lines):
+    if not 0 <= line < len(lines):
         return None
-
     line_text = lines[line]
-    if not line_text:
-        return None
 
-    if character < len(line_text) and (
-        line_text[character].isalnum() or line_text[character] == "_"
-    ):
-        index = character
-    elif character > 0 and (line_text[character - 1].isalnum() or line_text[character - 1] == "_"):
-        index = character - 1
-    else:
-        return None
-
-    start = index
-    while start > 0 and (line_text[start - 1].isalnum() or line_text[start - 1] == "_"):
-        start -= 1
-
-    end = index + 1
-    while end < len(line_text) and (line_text[end].isalnum() or line_text[end] == "_"):
-        end += 1
-
-    identifier = line_text[start:end]
-    if not _is_python_identifier(identifier):
-        return None
-    if start > 0 and line_text[start - 1] == "$":
-        return None
-    if start >= 2 and line_text[start - 2:start] == "${":
-        return None
-
-    return lsp.Range(
-        start=lsp.Position(line=line, character=start),
-        end=lsp.Position(line=line, character=end),
-    )
+    for m in _IDENT_RE.finditer(line_text):
+        start, end = m.span()
+        if not start <= character <= end:
+            continue
+        if not _is_python_identifier(m.group()):
+            return None
+        # Reject xonsh env-var prefixes: $FOO and ${FOO}.
+        if start > 0 and line_text[start - 1] == "$":
+            return None
+        if start >= 2 and line_text[start - 2 : start] == "${":
+            return None
+        return lsp.Range(
+            start=lsp.Position(line=line, character=start),
+            end=lsp.Position(line=line, character=end),
+        )
+    return None
 
 
 def _create_backend(
