@@ -98,6 +98,29 @@ class PythonBackend(Protocol):
         """
         ...
 
+    async def rename(
+        self,
+        source: str,
+        line: int,
+        col: int,
+        new_name: str,
+        path: str | None = None,
+    ) -> lsp.WorkspaceEdit | None:
+        """Rename the symbol at the given position.
+
+        Args:
+            source: The original xonsh source code.
+            line: 0-based line number.
+            col: 0-based column number.
+            new_name: The new name for the symbol.
+            path: Optional file path for context.
+
+        Returns:
+            Workspace edit applying the rename, or None if the symbol
+            cannot be renamed.
+        """
+        ...
+
     async def get_diagnostics(
         self, source: str, path: str | None = None
     ) -> list[lsp.Diagnostic]:

@@ -1706,3 +1706,86 @@ class TestTokenInReplacement:
         mapping = [(0, 0), (5, 21), (20, 36)]
         # Token from proc 15 to 25 (spans replacement and identity)
         assert _token_in_replacement(mapping, 15, 25) is False
+
+
+class TestRemapWorkspaceEdit:
+    """Tests for _remap_workspace_edit (rename coordinate remapping)."""
+
+    @staticmethod
+    def _edit(line: int, char: int, length: int, text: str = "renamed") -> lsp.TextEdit:
+        return lsp.TextEdit(
+            range=lsp.Range(
+                start=lsp.Position(line=line, character=char),
+                end=lsp.Position(line=line, character=char + length),
+            ),
+            new_text=text,
+        )
+
+    @pytest.fixture
+    def backend(self):
+        from xonsh_lsp.lsp_proxy_backend import _SyncState
+        from xonsh_lsp.preprocessing import preprocess_with_mapping
+
+        backend = LspProxyBackend(["dummy-lsp"])
+        backend._sync_state["file:///a.py"] = _SyncState(
+            preprocess_result=preprocess_with_mapping("value = 1\nprint(value)\n"),
+            preamble_lines=0,
+        )
+        # Second synced xonsh doc, child sees 2 preamble lines on top.
+        backend._sync_state["file:///b.py"] = _SyncState(
+            preprocess_result=preprocess_with_mapping("value = 2\n"),
+            preamble_lines=2,
+        )
+        backend._uri_map["file:///a.py"] = "file:///a.xsh"
+        backend._uri_map["file:///b.py"] = "file:///b.xsh"
+        return backend
+
+    def test_other_synced_doc_remapped_with_own_preamble(self, backend):
+        """Edits in a second synced xonsh doc use that doc's sync state."""
+        edit = lsp.WorkspaceEdit(
+            changes={
+                "file:///a.py": [self._edit(0, 0, 5)],
+                "file:///b.py": [self._edit(2, 0, 5)],  # line 0 + its preamble of 2
+            }
+        )
+        result = backend._remap_workspace_edit(edit)
+        assert result is not None
+        assert set(result.changes) == {"file:///a.xsh", "file:///b.xsh"}
+        b_edit = result.changes["file:///b.xsh"][0]
+        assert b_edit.range.start.line == 0
+        assert b_edit.range.start.character == 0
+
+    def test_unsynced_disk_file_passes_through(self, backend):
+        edit = lsp.WorkspaceEdit(
+            changes={"file:///lib/helper.py": [self._edit(7, 4, 5)]}
+        )
+        result = backend._remap_workspace_edit(edit)
+        assert result is not None
+        e = result.changes["file:///lib/helper.py"][0]
+        assert (e.range.start.line, e.range.start.character) == (7, 4)
+
+    def test_unmappable_edit_refuses_whole_rename(self, backend):
+        """An edit inside a synced doc's preamble fails the entire rename."""
+        edit = lsp.WorkspaceEdit(
+            changes={
+                "file:///a.py": [self._edit(0, 0, 5)],
+                "file:///b.py": [self._edit(0, 0, 5)],  # inside b's preamble
+            }
+        )
+        assert backend._remap_workspace_edit(edit) is None
+
+    def test_document_changes_remapped(self, backend):
+        edit = lsp.WorkspaceEdit(
+            document_changes=[
+                lsp.TextDocumentEdit(
+                    text_document=lsp.OptionalVersionedTextDocumentIdentifier(
+                        uri="file:///b.py", version=None
+                    ),
+                    edits=[self._edit(2, 0, 5)],
+                )
+            ]
+        )
+        result = backend._remap_workspace_edit(edit)
+        assert result is not None
+        e = result.changes["file:///b.xsh"][0]
+        assert e.range.start.line == 0
