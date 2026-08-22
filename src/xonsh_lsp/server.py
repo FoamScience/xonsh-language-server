@@ -387,6 +387,10 @@ async def did_close(params: lsp.DidCloseTextDocumentParams) -> None:
     # Clear diagnostics cache
     server.diagnostics_provider.clear_cache(uri)
 
+    # Drop cached parse trees for the closed document
+    for key in [k for k in server._parse_cache if k.startswith(f"{uri}:")]:
+        del server._parse_cache[key]
+
     # Clear diagnostics
     server.text_document_publish_diagnostics(
         lsp.PublishDiagnosticsParams(uri=uri, diagnostics=[])
