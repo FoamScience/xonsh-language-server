@@ -21,7 +21,7 @@ def greet(name):
 def farewell():
     print("Goodbye!")
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         function_symbols = [s for s in symbols if s["kind"] == "function"]
         names = [s["name"] for s in function_symbols]
         assert "greet" in names
@@ -37,7 +37,7 @@ class MyClass:
 class AnotherClass:
     pass
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         class_symbols = [s for s in symbols if s["kind"] == "class"]
         names = [s["name"] for s in class_symbols]
         assert "MyClass" in names
@@ -50,7 +50,7 @@ x = 1
 my_variable = "hello"
 result = calculate()
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         var_symbols = [s for s in symbols if s["kind"] == "variable"]
         names = [s["name"] for s in var_symbols]
         assert "x" in names
@@ -65,7 +65,7 @@ path = ${PATH}
 files = $(ls -la)
 result = !(git status)
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         var_symbols = [s for s in symbols if s["kind"] == "variable"]
         names = [s["name"] for s in var_symbols]
         assert "home" in names
@@ -76,7 +76,7 @@ result = !(git status)
     def test_variable_details(self, parser):
         """Test that variable details contain RHS."""
         source = 'name = "world"'
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         var_symbols = [s for s in symbols if s["kind"] == "variable"]
         assert len(var_symbols) == 1
         assert var_symbols[0]["name"] == "name"
@@ -85,7 +85,7 @@ result = !(git status)
     def test_xonsh_variable_details(self, parser):
         """Test that xonsh variable details show xonsh syntax."""
         source = "home = $HOME"
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         var_symbols = [s for s in symbols if s["kind"] == "variable"]
         assert len(var_symbols) == 1
         assert var_symbols[0]["name"] == "home"
@@ -97,7 +97,7 @@ result = !(git status)
 import os
 import sys
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         module_symbols = [s for s in symbols if s["kind"] == "module"]
         names = [s["name"] for s in module_symbols]
         assert "os" in names
@@ -117,7 +117,7 @@ def greet():
 class MyClass:
     pass
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
 
         # Check all types are present
         kinds = set(s["kind"] for s in symbols)
@@ -134,7 +134,7 @@ class MyClass:
 def second():
     pass
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         function_symbols = [s for s in symbols if s["kind"] == "function"]
 
         first_func = next(s for s in function_symbols if s["name"] == "first")
@@ -145,7 +145,7 @@ def second():
 
     def test_empty_source(self, parser):
         """Test document symbols for empty source."""
-        symbols = parser.get_document_symbols("")
+        symbols = parser.get_document_symbols(parser.parse(""))
         assert symbols == []
 
     def test_comment_only_source(self, parser):
@@ -154,14 +154,14 @@ def second():
 # This is a comment
 # Another comment
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         assert symbols == []
 
     def test_long_detail_truncation(self, parser):
         """Test that long details are truncated."""
         long_value = "x" * 100
         source = f'var = "{long_value}"'
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         var_symbols = [s for s in symbols if s["kind"] == "variable"]
         assert len(var_symbols) == 1
         # Detail should be truncated
@@ -175,7 +175,7 @@ def outer():
         pass
     return inner
 """
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         function_symbols = [s for s in symbols if s["kind"] == "function"]
         names = [s["name"] for s in function_symbols]
         # Should include both outer and inner (we traverse all nodes)

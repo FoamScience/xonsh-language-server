@@ -78,14 +78,14 @@ class TestMultiByteNodeText:
         """get_document_symbols must return correct function names even when
         the source has CJK characters above the function definition."""
         source = '# 你好世界\ndef hello():\n    pass'
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         func_names = [s["name"] for s in symbols if s["kind"] == "function"]
         assert "hello" in func_names
 
     def test_document_symbols_variable_after_emoji(self, parser):
         """Variable name extraction must be correct after multi-byte chars."""
         source = 'emoji = "🎉"\nmy_variable = 42'
-        symbols = parser.get_document_symbols(source)
+        symbols = parser.get_document_symbols(parser.parse(source))
         var_names = [s["name"] for s in symbols if s["kind"] == "variable"]
         assert "my_variable" in var_names
 
