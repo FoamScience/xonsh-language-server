@@ -1789,3 +1789,196 @@ class TestRemapWorkspaceEdit:
         assert result is not None
         e = result.changes["file:///b.xsh"][0]
         assert e.range.start.line == 0
+
+
+class TestSiblingShadow:
+    """Sibling .xsh modules are mirrored as .py so the child can resolve imports."""
+
+    def _backend(self, root):
+        backend = LspProxyBackend(KNOWN_BACKENDS["ty"])
+        backend._workspace_root = str(root)
+        backend._build_shadow()
+        return backend
+
+    def test_shadow_mirrors_xsh_as_py(self, tmp_path):
+        scripts = tmp_path / "tools" / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "git_utils.xsh").write_text("def git_dir():\n    return $PWD\n")
+        backend = self._backend(tmp_path)
+        try:
+            shadowed = backend._shadow_dir / "tools" / "scripts" / "git_utils.py"
+            assert shadowed.exists()
+            assert "def git_dir():" in shadowed.read_text()
+            # Each directory is its own search path, so bare-name sibling
+            # imports resolve.
+            assert str(shadowed.parent) in backend._shadow_paths
+            assert str(backend._shadow_dir) in backend._shadow_paths
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_shadow_is_line_preserving(self, tmp_path):
+        (tmp_path / "m.xsh").write_text("x = 1\nls -la\ndef f():\n    return x\n")
+        backend = self._backend(tmp_path)
+        try:
+            text = (backend._shadow_dir / "m.py").read_text()
+            assert len(text.splitlines()) == 4
+            assert text.splitlines()[2] == "def f():"
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_shadow_maps_back_to_real_file(self, tmp_path):
+        real = tmp_path / "m.xsh"
+        real.write_text("def f():\n    pass\n")
+        backend = self._backend(tmp_path)
+        try:
+            shadow_uri = (backend._shadow_dir / "m.py").as_uri()
+            assert backend._uri_map[shadow_uri] == real.as_uri()
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_real_py_sibling_is_not_shadowed(self, tmp_path):
+        (tmp_path / "m.xsh").write_text("def f():\n    pass\n")
+        (tmp_path / "m.py").write_text("def real():\n    pass\n")
+        backend = self._backend(tmp_path)
+        try:
+            assert not (backend._shadow_dir / "m.py").exists()
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_ignored_directories_are_skipped(self, tmp_path):
+        for name in (".git", ".venv", "node_modules"):
+            d = tmp_path / name
+            d.mkdir()
+            (d / "junk.xsh").write_text("x = 1\n")
+        (tmp_path / "keep.xsh").write_text("x = 1\n")
+        backend = self._backend(tmp_path)
+        try:
+            assert (backend._shadow_dir / "keep.py").exists()
+            assert not (backend._shadow_dir / ".git" / "junk.py").exists()
+            assert not (backend._shadow_dir / ".venv" / "junk.py").exists()
+            assert not (backend._shadow_dir / "node_modules" / "junk.py").exists()
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_refresh_shadow_picks_up_new_file(self, tmp_path):
+        backend = self._backend(tmp_path)
+        try:
+            new = tmp_path / "later.xsh"
+            new.write_text("def f():\n    pass\n")
+            backend.refresh_shadow(str(new))
+            assert (backend._shadow_dir / "later.py").exists()
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_inject_extra_paths_ty(self, tmp_path):
+        (tmp_path / "m.xsh").write_text("x = 1\n")
+        backend = self._backend(tmp_path)
+        try:
+            merged = backend._inject_extra_paths(
+                "ty", {"configuration": {"environment": {"extra-paths": ["/user"]}}}
+            )
+            paths = merged["configuration"]["environment"]["extra-paths"]
+            assert paths[0] == "/user"
+            assert str(backend._shadow_dir) in paths
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_inject_extra_paths_pyright(self, tmp_path):
+        (tmp_path / "m.xsh").write_text("x = 1\n")
+        backend = self._backend(tmp_path)
+        try:
+            merged = backend._inject_extra_paths("python", None)
+            assert str(backend._shadow_dir) in merged["analysis"]["extraPaths"]
+        finally:
+            import shutil
+
+            shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_inject_is_noop_without_shadow(self):
+        backend = LspProxyBackend(KNOWN_BACKENDS["ty"])
+        assert backend._inject_extra_paths("ty", {"a": 1}) == {"a": 1}
+
+
+class TestShadowWatchedFiles:
+    """Shadow files track .xsh changes made outside the editor."""
+
+    def _backend(self, root):
+        backend = LspProxyBackend(KNOWN_BACKENDS["ty"])
+        backend._workspace_root = str(root)
+        backend._build_shadow()
+        backend._client = MagicMock()
+        backend._started = True
+        return backend
+
+    def _cleanup(self, backend):
+        import shutil
+
+        shutil.rmtree(backend._shadow_dir, ignore_errors=True)
+
+    def test_refresh_notifies_child_of_new_module(self, tmp_path):
+        backend = self._backend(tmp_path)
+        try:
+            new = tmp_path / "later.xsh"
+            new.write_text("def f():\n    pass\n")
+            backend.refresh_shadow(str(new))
+            # The shadow tree is outside the workspace, so the child only
+            # learns about it from an explicit notification.
+            call = backend._client.workspace_did_change_watched_files.call_args
+            event = call.args[0].changes[0]
+            assert event.uri == (backend._shadow_dir / "later.py").as_uri()
+            assert event.type == lsp.FileChangeType.Created
+        finally:
+            self._cleanup(backend)
+
+    def test_refresh_of_existing_module_reports_changed(self, tmp_path):
+        (tmp_path / "m.xsh").write_text("def f():\n    pass\n")
+        backend = self._backend(tmp_path)
+        try:
+            (tmp_path / "m.xsh").write_text("def f():\n    return 2\n")
+            backend.refresh_shadow(str(tmp_path / "m.xsh"))
+            event = backend._client.workspace_did_change_watched_files.call_args.args[
+                0
+            ].changes[0]
+            assert event.type == lsp.FileChangeType.Changed
+            assert "return 2" in (backend._shadow_dir / "m.py").read_text()
+        finally:
+            self._cleanup(backend)
+
+    def test_remove_shadow_deletes_and_notifies(self, tmp_path):
+        real = tmp_path / "m.xsh"
+        real.write_text("def f():\n    pass\n")
+        backend = self._backend(tmp_path)
+        try:
+            shadow = backend._shadow_dir / "m.py"
+            assert shadow.exists()
+            backend.remove_shadow(str(real))
+            assert not shadow.exists()
+            assert shadow.as_uri() not in backend._uri_map
+            event = backend._client.workspace_did_change_watched_files.call_args.args[
+                0
+            ].changes[0]
+            assert event.type == lsp.FileChangeType.Deleted
+        finally:
+            self._cleanup(backend)
+
+    def test_remove_shadow_ignores_unknown_file(self, tmp_path):
+        backend = self._backend(tmp_path)
+        try:
+            backend.remove_shadow(str(tmp_path / "never.xsh"))
+            backend._client.workspace_did_change_watched_files.assert_not_called()
+        finally:
+            self._cleanup(backend)
