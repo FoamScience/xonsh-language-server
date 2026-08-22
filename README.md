@@ -363,6 +363,16 @@ Xonsh-specific features (environment variable completions, operator hover, subpr
 diagnostics, etc.) are always handled natively — only Python analysis is delegated to
 the backend.
 
+**Sibling imports.** Type checkers resolve imports against the file system, so a
+script doing `from git_utils import git_dir` would not find a sibling
+`git_utils.xsh`. On startup xonsh-lsp mirrors every workspace `.xsh` file into a
+temporary tree as preprocessed `.py` modules and passes that tree to the backend as
+an extra module search path. The tree is refreshed when a `.xsh` file is opened or
+saved, and — for editors that support dynamic registration — when one is created,
+changed, or deleted outside the editor via `workspace/didChangeWatchedFiles`.
+A `foo.xsh` sitting next to a real `foo.py` is left alone, so imports of `foo`
+still resolve to the real module.
+
 **Diagnostics** use a two-phase merge:
 - Xonsh diagnostics (syntax errors, undefined env vars, unknown commands) are published immediately
 - Python diagnostics from the backend arrive asynchronously and are merged with the cached xonsh diagnostics

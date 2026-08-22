@@ -1,3 +1,4 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -200,3 +201,55 @@ async def test_symbols_and_folding_reuse_cached_parse(monkeypatch, document):
     assert len(calls) == 1
     assert any(s.name == "f" for s in symbols)
     assert ranges
+
+
+class TestDidChangeWatchedFiles:
+    """.xsh changes made outside the editor reach the backend's shadow tree."""
+
+    @pytest.fixture
+    def shadow_backend(self, monkeypatch):
+        backend = SimpleNamespace()
+        backend.refresh_shadow = lambda path: refreshed.append(path)
+        backend.remove_shadow = lambda path: removed.append(path)
+        refreshed: list[str] = []
+        removed: list[str] = []
+        backend.refreshed = refreshed
+        backend.removed = removed
+        monkeypatch.setattr(server_module.server, "python_backend", backend)
+        return backend
+
+    async def _notify(self, uri, change_type):
+        await server_module.did_change_watched_files(
+            lsp.DidChangeWatchedFilesParams(
+                changes=[lsp.FileEvent(uri=uri, type=change_type)]
+            )
+        )
+
+    @pytest.mark.asyncio
+    async def test_created_and_changed_refresh(self, shadow_backend):
+        await self._notify("file:///w/a.xsh", lsp.FileChangeType.Created)
+        await self._notify("file:///w/b.xsh", lsp.FileChangeType.Changed)
+        # to_fs_path yields native separators, so compare as paths.
+        assert [Path(p) for p in shadow_backend.refreshed] == [
+            Path("/w/a.xsh"),
+            Path("/w/b.xsh"),
+        ]
+        assert shadow_backend.removed == []
+
+    @pytest.mark.asyncio
+    async def test_deleted_removes(self, shadow_backend):
+        await self._notify("file:///w/a.xsh", lsp.FileChangeType.Deleted)
+        assert [Path(p) for p in shadow_backend.removed] == [Path("/w/a.xsh")]
+        assert shadow_backend.refreshed == []
+
+    @pytest.mark.asyncio
+    async def test_non_xsh_files_ignored(self, shadow_backend):
+        await self._notify("file:///w/a.py", lsp.FileChangeType.Changed)
+        assert shadow_backend.refreshed == []
+        assert shadow_backend.removed == []
+
+    @pytest.mark.asyncio
+    async def test_backend_without_shadow_support(self, monkeypatch):
+        monkeypatch.setattr(server_module.server, "python_backend", SimpleNamespace())
+        # Jedi backend has no shadow tree; must not raise.
+        await self._notify("file:///w/a.xsh", lsp.FileChangeType.Changed)

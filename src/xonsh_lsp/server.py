@@ -14,6 +14,7 @@ import re
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from lsprotocol import types as lsp
+from pygls import uris
 from pygls.lsp.server import LanguageServer
 
 from xonsh_lsp.completions import XonshCompletionProvider
@@ -297,6 +298,9 @@ async def initialize(params: lsp.InitializeParams) -> None:
             version=server.version,
         )
 
+    # Save client capabilities for use in `initialized`
+    server._client_capabilities = params.capabilities
+
     # Save workspace root for use in `initialized`
     server._workspace_root = None
     if params.root_uri:
@@ -317,6 +321,8 @@ async def initialized(params: lsp.InitializedParams) -> None:
     if server.python_backend is not None:
         await server.python_backend.start(server._workspace_root)
 
+        await _register_xsh_file_watcher()
+
         # Re-sync documents that were opened while the backend was starting.
         # Editors often send textDocument/didOpen before start() finishes,
         # and the proxy backend drops those (self._started is still False).
@@ -325,6 +331,55 @@ async def initialized(params: lsp.InitializedParams) -> None:
             server.text_document_publish_diagnostics(
                 lsp.PublishDiagnosticsParams(uri=uri, diagnostics=diagnostics)
             )
+
+
+async def _register_xsh_file_watcher() -> None:
+    """Ask the editor to report .xsh changes made outside the editor.
+
+    Watched-file notifications require dynamic registration; editors that
+    don't support it simply keep the open/save refresh path.
+    """
+    if getattr(server.python_backend, "refresh_shadow", None) is None:
+        return
+    capabilities = getattr(server, "_client_capabilities", None)
+    watched = getattr(getattr(capabilities, "workspace", None), "did_change_watched_files", None)
+    if not getattr(watched, "dynamic_registration", False):
+        logger.debug("Client does not support watched-file registration")
+        return
+    try:
+        await server.client_register_capability_async(
+            lsp.RegistrationParams(
+                registrations=[
+                    lsp.Registration(
+                        id="xonsh-lsp-xsh-watcher",
+                        method=lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES,
+                        register_options=lsp.DidChangeWatchedFilesRegistrationOptions(
+                            watchers=[lsp.FileSystemWatcher(glob_pattern="**/*.xsh")]
+                        ),
+                    )
+                ]
+            )
+        )
+        logger.debug("Registered .xsh file watcher")
+    except Exception as e:
+        logger.debug(f"Failed to register .xsh file watcher: {e}")
+
+
+@server.feature(lsp.WORKSPACE_DID_CHANGE_WATCHED_FILES)
+async def did_change_watched_files(params: lsp.DidChangeWatchedFilesParams) -> None:
+    """Keep sibling modules in step with .xsh edits made outside the editor."""
+    backend = server.python_backend
+    refresh = getattr(backend, "refresh_shadow", None)
+    if refresh is None:
+        return
+    for change in params.changes:
+        path = uris.to_fs_path(change.uri)
+        if path is None or not path.endswith(".xsh"):
+            continue
+        if change.type == lsp.FileChangeType.Deleted:
+            backend.remove_shadow(path)
+        else:
+            refresh(path)
 
 
 @server.feature(lsp.SHUTDOWN)
@@ -339,11 +394,23 @@ async def shutdown(params: Any) -> None:
 # ============================================================================
 
 
+def _refresh_sibling_shadow(uri: str) -> None:
+    """Let the backend re-mirror a .xsh file so siblings can import it."""
+    refresh = getattr(server.python_backend, "refresh_shadow", None)
+    if refresh is None:
+        return
+    doc = server.get_document(uri)
+    if doc is not None:
+        refresh(doc.path)
+
+
 @server.feature(lsp.TEXT_DOCUMENT_DID_OPEN)
 async def did_open(params: lsp.DidOpenTextDocumentParams) -> None:
     """Handle document open."""
     uri = params.text_document.uri
     logger.debug(f"Document opened: {uri}")
+
+    _refresh_sibling_shadow(uri)
 
     # Run diagnostics
     diagnostics = await server.diagnostics_provider.get_diagnostics(uri)
@@ -370,6 +437,8 @@ async def did_save(params: lsp.DidSaveTextDocumentParams) -> None:
     """Handle document save."""
     uri = params.text_document.uri
     logger.debug(f"Document saved: {uri}")
+
+    _refresh_sibling_shadow(uri)
 
     # Run diagnostics
     diagnostics = await server.diagnostics_provider.get_diagnostics(uri)
