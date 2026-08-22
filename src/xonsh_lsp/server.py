@@ -566,11 +566,12 @@ async def document_symbols(
 ) -> list[lsp.DocumentSymbol] | list[lsp.SymbolInformation] | None:
     """Provide document symbols."""
     uri = params.text_document.uri
-    if server.get_document(uri) is None:
+    parse_result = server.parse_document(uri)
+    if parse_result is None:
         return None
 
     # Use tree-sitter for symbol extraction (handles xonsh syntax)
-    raw_symbols = server.parser.get_document_symbols(server.parse_document(uri))
+    raw_symbols = server.parser.get_document_symbols(parse_result)
 
     # Convert to LSP DocumentSymbol format
     kind_map = {
@@ -611,10 +612,11 @@ async def document_symbols(
 async def folding_range(params: lsp.FoldingRangeParams) -> list[lsp.FoldingRange] | None:
     """Provide folding ranges."""
     uri = params.text_document.uri
-    if server.get_document(uri) is None:
+    parse_result = server.parse_document(uri)
+    if parse_result is None:
         return None
 
-    raw_ranges = server.parser.get_folding_ranges(server.parse_document(uri))
+    raw_ranges = server.parser.get_folding_ranges(parse_result)
 
     kind_map = {
         "comment": lsp.FoldingRangeKind.Comment,

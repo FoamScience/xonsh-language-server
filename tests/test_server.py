@@ -174,3 +174,29 @@ async def test_semantic_tokens_disabled_returns_none(monkeypatch, document, back
     assert rng is None
     backend.get_semantic_tokens.assert_not_awaited()
     backend.get_semantic_tokens_range.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_symbols_and_folding_reuse_cached_parse(monkeypatch, document):
+    """documentSymbol and foldingRange share the (uri, version) parse cache."""
+    uri = "file:///test/file.xsh"
+    document.source = "def f():\n    x = 1\n    return x\n"
+
+    real_server = server_module.XonshLanguageServer(name="test", version="0")
+    monkeypatch.setattr(real_server, "get_document", lambda _uri: document)
+    calls = []
+    real_parse = real_server.parser.parse
+    monkeypatch.setattr(
+        real_server.parser,
+        "parse",
+        lambda source: (calls.append(source), real_parse(source))[1],
+    )
+    monkeypatch.setattr(server_module, "server", real_server)
+
+    td = lsp.TextDocumentIdentifier(uri=uri)
+    symbols = await server_module.document_symbols(lsp.DocumentSymbolParams(text_document=td))
+    ranges = await server_module.folding_range(lsp.FoldingRangeParams(text_document=td))
+
+    assert len(calls) == 1
+    assert any(s.name == "f" for s in symbols)
+    assert ranges
