@@ -10,12 +10,10 @@ and handles asynchronous diagnostics.
 from __future__ import annotations
 
 import logging
-import os
-import shutil
-import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Optional, Sequence, Union
+from typing import TYPE_CHECKING, Any, Callable, Optional, Union
 
 from lsprotocol import types as lsp
 from pygls.lsp.client import LanguageClient
@@ -27,6 +25,7 @@ from xonsh_lsp.preprocessing import (
     preprocess_with_mapping,
 )
 from xonsh_lsp.python_backend_common import remap_text_edit
+from xonsh_lsp.shadow_tree import ShadowTree
 
 if TYPE_CHECKING:
     from pygls.lsp.server import LanguageServer
@@ -42,11 +41,6 @@ KNOWN_BACKENDS: dict[str, list[str]] = {
 }
 
 # Directories never scanned for sibling .xsh modules.
-SHADOW_IGNORE_DIRS = frozenset({
-    ".git", ".hg", ".svn", ".venv", "venv", ".env", "node_modules",
-    "__pycache__", ".mypy_cache", ".ruff_cache", ".pytest_cache", ".tox",
-})
-
 # Stub declarations prepended to preprocessed source so the child backend
 # recognises xonsh placeholder variables (__xonsh_env__, etc.) and xonsh
 # Path extensions (.cd(), .mkdir() returning self, etc.).
@@ -68,7 +62,8 @@ _XONSH_PREAMBLE_TAIL = [
     "__xonsh_at__: __xonsh_typing__.Any = None",
     "class __xonsh_Path__(__xonsh_pathlib__.Path):",
     "    def cd(self) -> '__xonsh_Path__': ...",
-    "    def mkdir(self, *a: __xonsh_typing__.Any, **kw: __xonsh_typing__.Any) -> '__xonsh_Path__': ...",
+    "    def mkdir(self, *a: __xonsh_typing__.Any, "
+    "**kw: __xonsh_typing__.Any) -> '__xonsh_Path__': ...",
     "    def __truediv__(self, o: __xonsh_typing__.Any) -> '__xonsh_Path__': ...",
     "    def __enter__(self) -> '__xonsh_Path__': ...",
     "    def __exit__(self, *a: __xonsh_typing__.Any) -> None: ...",
@@ -110,15 +105,6 @@ _XONSH_SEMANTIC_TOKEN_TYPES: dict[str, str] = {
     "glob_path": "string",
     "regex_path_glob": "string",
 }
-
-
-def _iter_xsh_files(root: Path):
-    """Yield .xsh files under *root*, skipping VCS/venv/cache directories."""
-    for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in SHADOW_IGNORE_DIRS]
-        for name in filenames:
-            if name.endswith(".xsh"):
-                yield Path(dirpath) / name
 
 
 @dataclass
@@ -163,7 +149,7 @@ class LspProxyBackend:
         command: list[str],
         on_diagnostics: Callable[[str, list[lsp.Diagnostic]], None] | None = None,
         backend_settings: dict[str, Any] | None = None,
-        server: "LanguageServer | None" = None,
+        server: LanguageServer | None = None,
     ) -> None:
         """Initialize the proxy backend.
 
@@ -188,8 +174,7 @@ class LspProxyBackend:
         self._sync_state: dict[str, _SyncState] = {}  # uri -> per-doc state
         self._semantic_type_remap: list[int] = []
         self._semantic_modifier_remap: list[int] = []
-        self._shadow_dir: Path | None = None
-        self._shadow_paths: list[str] = []
+        self._shadow = ShadowTree(None)
 
     async def start(self, workspace_root: str | None = None) -> None:
         """Start the child LSP server.
@@ -299,7 +284,12 @@ class LspProxyBackend:
                             document_symbol=lsp.DocumentSymbolClientCapabilities(),
                             inlay_hint=lsp.InlayHintClientCapabilities(
                                 resolve_support=lsp.ClientInlayHintResolveOptions(
-                                    properties=["tooltip", "textEdits", "label.tooltip", "label.location"],
+                                    properties=[
+                                        "tooltip",
+                                        "textEdits",
+                                        "label.tooltip",
+                                        "label.location",
+                                    ],
                                 ),
                             ),
                             semantic_tokens=lsp.SemanticTokensClientCapabilities(
@@ -333,7 +323,7 @@ class LspProxyBackend:
                     ),
                     root_uri=workspace_uri,
                     workspace_folders=workspace_folders,
-                    initialization_options=self._backend_settings if self._backend_settings else None,
+                    initialization_options=self._backend_settings or None,
                 )
             )
             server_info = getattr(result, 'server_info', None)
@@ -363,10 +353,7 @@ class LspProxyBackend:
         """Stop the child LSP server."""
         await self._try_stop_client()
         self._started = False
-        if self._shadow_dir is not None:
-            shutil.rmtree(self._shadow_dir, ignore_errors=True)
-            self._shadow_dir = None
-            self._shadow_paths = []
+        self._shadow.close()
 
     async def _try_stop_client(self) -> None:
         """Attempt to gracefully stop the client."""
@@ -402,60 +389,35 @@ class LspProxyBackend:
     # file in a temporary tree and hand that tree to the child as an extra
     # module search path.
 
+    @property
+    def _shadow_dir(self) -> Path | None:
+        """Root of the shadow tree, or None before it is built."""
+        return self._shadow.root
+
+    @property
+    def _shadow_paths(self) -> list[str]:
+        """Extra module search paths to hand the child backend."""
+        return self._shadow.search_paths
+
     def _build_shadow(self) -> None:
         """Mirror the workspace's .xsh files as importable .py modules."""
-        if self._workspace_root is None:
+        self._shadow = ShadowTree(self._workspace_root)
+        self._shadow.build()
+        if self._shadow.root is None:
             return
-        root = Path(self._workspace_root)
-        if not root.is_dir():
-            return
-        self._shadow_dir = Path(tempfile.mkdtemp(prefix="xonsh-lsp-shadow-"))
-        self._shadow_paths = [str(self._shadow_dir)]
-        count = 0
-        for path in _iter_xsh_files(root):
-            if self._write_shadow(path):
-                count += 1
-        logger.info(f"PROXY: shadowed {count} .xsh file(s) into {self._shadow_dir}")
+        for target in self._shadow.root.rglob("*.py"):
+            source = self._shadow.source_of(target)
+            if source is not None:
+                self._uri_map[target.as_uri()] = source.as_uri()
 
     def _write_shadow(self, path: Path) -> Path | None:
-        """Write one preprocessed .xsh file into the shadow tree.
+        """Mirror one .xsh file and route navigation back to the real file.
 
         Returns the shadow file that was written, or None if *path* was skipped.
         """
-        if self._shadow_dir is None or self._workspace_root is None:
-            return None
-        if path.suffix != ".xsh":
-            return None
-        if path.with_suffix(".py").exists():
-            # A real module already owns this name; shadowing it would replace
-            # the real file's contents for the whole workspace analysis.
-            logger.debug(f"PROXY: not shadowing {path} (real .py sibling exists)")
-            return None
-        try:
-            rel = path.relative_to(Path(self._workspace_root))
-            source = path.read_text(encoding="utf-8")
-        except (ValueError, OSError) as e:
-            logger.debug(f"PROXY: cannot shadow {path}: {e}")
-            return None
-
-        target = self._shadow_dir / rel.with_suffix(".py")
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            # No xonsh preamble here: preprocessing is line-preserving, so
-            # shadow line numbers match the real .xsh and go-to-definition
-            # results remap to the right line.
-            target.write_text(preprocess_with_mapping(source).source, encoding="utf-8")
-        except OSError as e:
-            logger.debug(f"PROXY: cannot write shadow for {path}: {e}")
-            return None
-
-        # Send navigation into a shadow module back to the real .xsh file.
-        self._uri_map[target.as_uri()] = path.as_uri()
-        # Siblings are imported by bare name, so each directory needs to be a
-        # search path of its own, not just the shadow root.
-        parent = str(target.parent)
-        if parent not in self._shadow_paths:
-            self._shadow_paths.append(parent)
+        target = self._shadow.write(path)
+        if target is not None:
+            self._uri_map[target.as_uri()] = path.as_uri()
         return target
 
     def _notify_child(self, target: Path, change: lsp.FileChangeType) -> None:
@@ -487,7 +449,7 @@ class LspProxyBackend:
         if self._shadow_dir is None or path is None:
             return
         known_paths = len(self._shadow_paths)
-        existed = self._shadow_target(Path(path))
+        existed = self._shadow.target(Path(path))
         target = self._write_shadow(Path(path))
         if target is None:
             return
@@ -505,27 +467,11 @@ class LspProxyBackend:
         """Drop a shadow module after its .xsh file was deleted."""
         if self._shadow_dir is None or path is None:
             return
-        target = self._shadow_target(Path(path))
-        if target is None or not target.exists():
-            return
-        try:
-            target.unlink()
-        except OSError as e:
-            logger.debug(f"PROXY: cannot remove shadow {target}: {e}")
+        target = self._shadow.remove(Path(path))
+        if target is None:
             return
         self._uri_map.pop(target.as_uri(), None)
         self._notify_child(target, lsp.FileChangeType.Deleted)
-
-    def _shadow_target(self, path: Path) -> Path | None:
-        """Existing shadow file for *path*, or None if it was never written."""
-        if self._shadow_dir is None or self._workspace_root is None:
-            return None
-        try:
-            rel = path.relative_to(Path(self._workspace_root))
-        except ValueError:
-            return None
-        target = self._shadow_dir / rel.with_suffix(".py")
-        return target if target.exists() else None
 
     def _inject_extra_paths(self, section: str, value: Any) -> Any:
         """Add the shadow directories to a configuration reply's search paths."""
@@ -1341,7 +1287,9 @@ class LspProxyBackend:
             token_type_name = _XONSH_SEMANTIC_TOKEN_TYPES.get(rr_type)
             if token_type_name and token_type_name in SEMANTIC_TOKEN_TYPES:
                 type_idx = SEMANTIC_TOKEN_TYPES.index(token_type_name)
-                remapped.append((rr_start_line, rr_start_col, rr_end_col - rr_start_col, type_idx, 0))
+                remapped.append(
+                    (rr_start_line, rr_start_col, rr_end_col - rr_start_col, type_idx, 0)
+                )
 
         # Sort by (line, char) for proper delta encoding
         remapped.sort(key=lambda t: (t[0], t[1]))
@@ -1380,7 +1328,7 @@ class LspProxyBackend:
 
         If the child's legend matches ours exactly, the remap is identity.
         """
-        from xonsh_lsp.server import SEMANTIC_TOKEN_TYPES, SEMANTIC_TOKEN_MODIFIERS
+        from xonsh_lsp.server import SEMANTIC_TOKEN_MODIFIERS, SEMANTIC_TOKEN_TYPES
 
         caps = init_result.capabilities
         provider = getattr(caps, 'semantic_tokens_provider', None)
@@ -1615,7 +1563,8 @@ class LspProxyBackend:
         # Try forwarding to the editor
         if self._server is not None:
             try:
-                logger.debug(f"PROXY: forwarding config request to editor: {[i.section for i in params.items]}")
+                sections = [i.section for i in params.items]
+                logger.debug(f"PROXY: forwarding config request to editor: {sections}")
                 result = await self._server.send_request_async(
                     lsp.WORKSPACE_CONFIGURATION, params
                 )
