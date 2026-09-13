@@ -542,7 +542,7 @@ class JediBackend:
                     params.append(
                         lsp.ParameterInformation(
                             label=param.name,
-                            documentation=param.description if hasattr(param, 'description') else None,
+                            documentation=getattr(param, "description", None),
                         )
                     )
 
