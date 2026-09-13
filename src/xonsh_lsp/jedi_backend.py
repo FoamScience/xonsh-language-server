@@ -19,6 +19,7 @@ from xonsh_lsp.preprocessing import (
     preprocess_with_mapping,
 )
 from xonsh_lsp.python_backend_common import remap_text_edit
+from xonsh_lsp.shadow_tree import ShadowTree
 
 try:
     import jedi
@@ -45,14 +46,60 @@ class JediBackend:
     def __init__(self) -> None:
         if not JEDI_AVAILABLE:
             logger.warning("Jedi not available - Python features will be limited")
+        self._shadow = ShadowTree(None)
+        self._project = None
 
     async def start(self, workspace_root: str | None = None) -> None:
-        """Start the backend (no-op for Jedi)."""
-        pass
+        """Mirror the workspace's .xsh files so sibling imports resolve."""
+        if not JEDI_AVAILABLE:
+            return
+        self._shadow = ShadowTree(workspace_root)
+        self._shadow.build()
+        self._rebuild_project()
 
     async def stop(self) -> None:
-        """Stop the backend (no-op for Jedi)."""
-        pass
+        """Drop the shadow tree."""
+        self._shadow.close()
+        self._project = None
+
+    def _rebuild_project(self) -> None:
+        """Point Jedi at the workspace with the shadow tree on its path.
+
+        The search paths are baked into the Project, so a new shadow directory
+        means a new Project.
+        """
+        if self._shadow.root is None:
+            self._project = None
+            return
+        self._project = jedi.Project(
+            self._shadow.workspace_root,
+            added_sys_path=list(self._shadow.search_paths),
+        )
+
+    def refresh_shadow(self, path: str | None) -> None:
+        """Re-mirror a .xsh file after it was opened, saved, or changed."""
+        if path is None or self._shadow.root is None:
+            return
+        known_paths = len(self._shadow.search_paths)
+        if self._shadow.write(Path(path)) is None:
+            return
+        if len(self._shadow.search_paths) != known_paths:
+            self._rebuild_project()
+
+    def remove_shadow(self, path: str | None) -> None:
+        """Drop a shadow module after its .xsh file was deleted."""
+        if path is None:
+            return
+        self._shadow.remove(Path(path))
+
+    def _script(self, code: str, path: str | None) -> Script:
+        """Build a Jedi Script that can see the shadowed sibling modules."""
+        return Script(code, path=path, project=self._project)
+
+    def _result_uri(self, module_path) -> str:
+        """URI for a Jedi result, sending shadow hits back to the real .xsh."""
+        source = self._shadow.source_of(Path(module_path))
+        return (source or Path(module_path)).as_uri()
 
     async def get_completions(
         self,
@@ -75,7 +122,7 @@ class JediBackend:
             )
 
             # Jedi uses 1-based line numbers
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             completions = script.complete(mapped_line + 1, mapped_col)
 
             items = []
@@ -118,7 +165,7 @@ class JediBackend:
                 preprocess_result, line, col
             )
 
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             names = script.infer(mapped_line + 1, mapped_col)
 
             if not names:
@@ -176,7 +223,7 @@ class JediBackend:
                 preprocess_result, line, col
             )
 
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             names = script.goto(mapped_line + 1, mapped_col)
 
             locations = []
@@ -193,7 +240,7 @@ class JediBackend:
 
                     locations.append(
                         lsp.Location(
-                            uri=Path(name.module_path).as_uri(),
+                            uri=self._result_uri(name.module_path),
                             range=lsp.Range(
                                 start=lsp.Position(
                                     line=result_line,
@@ -233,7 +280,7 @@ class JediBackend:
                 preprocess_result, line, col
             )
 
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             names = script.get_references(mapped_line + 1, mapped_col)
 
             locations = []
@@ -250,7 +297,7 @@ class JediBackend:
 
                     locations.append(
                         lsp.Location(
-                            uri=Path(name.module_path).as_uri(),
+                            uri=self._result_uri(name.module_path),
                             range=lsp.Range(
                                 start=lsp.Position(
                                     line=result_line,
@@ -288,7 +335,7 @@ class JediBackend:
                 preprocess_result, line, col
             )
 
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             try:
                 refactoring = script.rename(
                     mapped_line + 1, mapped_col, new_name=new_name
@@ -364,7 +411,7 @@ class JediBackend:
         try:
             # Preprocess xonsh syntax to valid Python
             preprocess_result = preprocess_with_mapping(source)
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             errors = script.get_syntax_errors()
 
             xonsh_lines = preprocess_result.xonsh_lines
@@ -417,7 +464,7 @@ class JediBackend:
         try:
             # Preprocess xonsh syntax to valid Python
             processed_source = preprocess_source(source)
-            script = Script(processed_source, path=path)
+            script = self._script(processed_source, path)
             names = script.get_names(all_scopes=True, definitions=True)
 
             symbols = []
@@ -479,7 +526,7 @@ class JediBackend:
                 preprocess_result, line, col
             )
 
-            script = Script(preprocess_result.source, path=path)
+            script = self._script(preprocess_result.source, path)
             signatures = script.get_signatures(mapped_line + 1, mapped_col)
 
             if not signatures:
