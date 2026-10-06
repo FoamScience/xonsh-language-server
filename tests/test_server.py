@@ -1,6 +1,6 @@
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from lsprotocol import types as lsp
@@ -201,6 +201,53 @@ async def test_symbols_and_folding_reuse_cached_parse(monkeypatch, document):
     assert len(calls) == 1
     assert any(s.name == "f" for s in symbols)
     assert ranges
+
+
+class TestDidSave:
+    @pytest.fixture
+    def mock_server(self, monkeypatch):
+        mock = MagicMock()
+        mock.python_backend = None
+        mock.workspace.text_documents = {}
+        mock.diagnostics_provider.get_diagnostics = AsyncMock(return_value=[])
+        monkeypatch.setattr(server_module, "server", mock)
+        return mock
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("uri", ["file:///test/file.lua", "file:///test/file.xsh"])
+    async def test_unopened_document_is_ignored(self, mock_server, uri):
+        await server_module.did_save(
+            lsp.DidSaveTextDocumentParams(text_document=lsp.TextDocumentIdentifier(uri=uri))
+        )
+
+        mock_server.diagnostics_provider.get_diagnostics.assert_not_awaited()
+        mock_server.text_document_publish_diagnostics.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_opened_non_xonsh_document_is_ignored(self, mock_server):
+        uri = "file:///test/file.lua"
+        mock_server.workspace.text_documents[uri] = SimpleNamespace(language_id="lua")
+
+        await server_module.did_save(
+            lsp.DidSaveTextDocumentParams(text_document=lsp.TextDocumentIdentifier(uri=uri))
+        )
+
+        mock_server.diagnostics_provider.get_diagnostics.assert_not_awaited()
+        mock_server.text_document_publish_diagnostics.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_opened_xonsh_document_is_diagnosed(self, mock_server):
+        uri = "file:///test/file%20name.xsh"
+        mock_server.workspace.text_documents["file:///test/file name.xsh"] = SimpleNamespace(
+            language_id="xonsh"
+        )
+
+        await server_module.did_save(
+            lsp.DidSaveTextDocumentParams(text_document=lsp.TextDocumentIdentifier(uri=uri))
+        )
+
+        mock_server.diagnostics_provider.get_diagnostics.assert_awaited_once_with(uri)
+        mock_server.text_document_publish_diagnostics.assert_called_once()
 
 
 class TestDidChangeWatchedFiles:
