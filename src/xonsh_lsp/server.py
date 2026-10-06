@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from typing import TYPE_CHECKING, Any, NamedTuple
+from urllib.parse import unquote
 
 from lsprotocol import types as lsp
 from pygls import uris
@@ -437,6 +438,13 @@ async def did_save(params: lsp.DidSaveTextDocumentParams) -> None:
     """Handle document save."""
     uri = params.text_document.uri
     logger.debug(f"Document saved: {uri}")
+
+    # pygls can load an unknown URI from disk. Only diagnose documents that
+    # this server opened as Xonsh documents.
+    doc = server.workspace.text_documents.get(unquote(uri))
+    if doc is None or doc.language_id != "xonsh":
+        logger.debug("Ignoring save for unopened or non-Xonsh document: %s", uri)
+        return
 
     _refresh_sibling_shadow(uri)
 
